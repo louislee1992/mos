@@ -52,17 +52,21 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      console.log('[LoginScreen] handleSubmit, endpoint:', endpoint.trim());
       setError(null);
       setLoading(true);
       try {
         const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('verify_credentials', {
+        console.log('[LoginScreen] invoking verify_credentials');
+        const result = await invoke('verify_credentials', {
           endpoint: endpoint.trim(),
           accessKey: accessKey.trim(),
           secretKey: secretKey.trim(),
         });
+        console.log('[LoginScreen] verify_credentials success:', result);
         onLoginSuccess();
       } catch (err) {
+        console.error('[LoginScreen] verify_credentials failed:', err);
         setError(typeof err === 'string' ? err : '连接失败，请检查凭证和地址');
       } finally {
         setLoading(false);

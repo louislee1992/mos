@@ -443,7 +443,10 @@ const Taskbar: FC<TaskbarProps> = ({
       {/* 用户菜单 */}
       <div className="relative" ref={menuRef}>
         <button
-          onClick={() => setMenuOpen((v) => !v)}
+          onClick={() => {
+            console.log('[Taskbar] user button clicked, toggling menu');
+            setMenuOpen((v) => !v);
+          }}
           className="taskbar-btn w-10 h-10 rounded-lg flex items-center justify-center
                      hover:bg-white/10 active:scale-90"
           title="用户中心"
@@ -466,6 +469,7 @@ const Taskbar: FC<TaskbarProps> = ({
           >
             <button
               onClick={() => {
+                console.log('[Taskbar] 切换账号 clicked');
                 setMenuOpen(false);
                 onLogout();
               }}
@@ -475,6 +479,7 @@ const Taskbar: FC<TaskbarProps> = ({
             </button>
             <button
               onClick={() => {
+                console.log('[Taskbar] 退出 clicked, calling onExit');
                 setMenuOpen(false);
                 onExit();
               }}

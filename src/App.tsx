@@ -66,13 +66,20 @@ function App() {
   }, []);
 
   const handleLogout = useCallback(() => {
+    console.log('[App] handleLogout called');
     setAuthenticated(false);
     setOpenWindows([]);
     setActiveWindowId(null);
   }, []);
 
   const handleExit = useCallback(() => {
-    getCurrentWindow().close();
+    console.log('[App] handleExit called, attempting getCurrentWindow().close()');
+    try {
+      getCurrentWindow().close();
+      console.log('[App] getCurrentWindow().close() executed');
+    } catch (e) {
+      console.error('[App] getCurrentWindow().close() failed:', e);
+    }
   }, []);
 
   if (!authenticated) {
