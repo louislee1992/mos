@@ -53,7 +53,7 @@ const Window: FC<WindowProps> = ({ app, onClose, onFocus, zIndex }) => {
   }, [dragging]);
 
   const maxX = window.innerWidth - size.width;
-  const maxY = window.innerHeight - size.height - 48; // taskbar height
+  const maxY = window.innerHeight - size.height;
   const clampedX = Math.max(0, Math.min(pos.x, maxX));
   const clampedY = Math.max(0, Math.min(pos.y, maxY));
 

@@ -80,14 +80,7 @@ function App() {
   }
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-black">
-      <Desktop
-        currentWallpaper={currentWallpaper}
-        desktopApps={desktopApps}
-        onOpenApp={openApp}
-        onWallpaperChange={setWallpaperId}
-      />
-
+    <div className="flex h-screen w-screen overflow-hidden bg-black">
       <Taskbar
         openApps={openWindows.map((w) => ({
           id: w.id,
@@ -100,6 +93,13 @@ function App() {
         onShowDesktop={showDesktop}
         onLogout={handleLogout}
         onExit={handleExit}
+      />
+
+      <Desktop
+        currentWallpaper={currentWallpaper}
+        desktopApps={desktopApps}
+        onOpenApp={openApp}
+        onWallpaperChange={setWallpaperId}
       />
 
       {openWindows.map((w) => (
