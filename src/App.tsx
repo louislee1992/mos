@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { wallpapers, defaultWallpaperId } from './data/wallpapers';
 import { desktopApps, type DesktopApp } from './data/apps';
 import Desktop from './components/Desktop';
@@ -70,8 +71,7 @@ function App() {
     setActiveWindowId(null);
   }, []);
 
-  const handleExit = useCallback(async () => {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  const handleExit = useCallback(() => {
     getCurrentWindow().close();
   }, []);
 
