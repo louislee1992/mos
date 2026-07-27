@@ -3,6 +3,7 @@ import type { DesktopApp } from '../data/apps';
 import iconSvgs from '../data/icons';
 import FileManager from './FileManager';
 import RecycleBin from './RecycleBin';
+import TextEditor from './TextEditor';
 
 interface WindowProps {
   app: DesktopApp;

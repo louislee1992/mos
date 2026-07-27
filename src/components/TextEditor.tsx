@@ -1,8 +1,9 @@
-import React, { type FC, useState, useEffect, useCallback, useRef } from 'react';
-import { EditorView, keymap, lineNumbers, highlightActiveLine, searchKeymap } from '@codemirror/view';
+import { type FC, useState, useEffect, useCallback, useRef } from 'react';
+import { EditorView, keymap, lineNumbers, highlightActiveLine } from '@codemirror/view';
 import { EditorState, type Extension } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
 import { syntaxHighlighting, defaultHighlightStyle, bracketMatching } from '@codemirror/language';
+import { searchKeymap } from '@codemirror/search';
 import { closeBrackets } from '@codemirror/autocomplete';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { json } from '@codemirror/lang-json';
