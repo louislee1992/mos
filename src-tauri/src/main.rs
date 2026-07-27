@@ -5,15 +5,17 @@ use aws_sdk_s3::Client;
 use std::sync::Mutex;
 use tauri::State;
 
-#[allow(dead_code)]
-struct MinioConfig {
-    endpoint: String,
-    access_key: String,
-    secret_key: String,
+mod accounts;
+mod bootstrap;
+
+pub struct MinioConfig {
+    pub endpoint: String,
+    pub access_key: String,
+    pub secret_key: String,
 }
 
-struct AppState {
-    minio: Mutex<Option<MinioConfig>>,
+pub struct AppState {
+    pub minio: Mutex<Option<MinioConfig>>,
 }
 
 fn normalize_endpoint(raw: &str) -> String {
@@ -90,10 +92,32 @@ async fn verify_credentials(
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             minio: Mutex::new(None),
         })
-        .invoke_handler(tauri::generate_handler![verify_credentials])
+        .invoke_handler(tauri::generate_handler![
+            verify_credentials,
+            accounts::load_accounts,
+            accounts::save_account,
+            accounts::delete_account,
+            bootstrap::bootstrap_user_bucket,
+            bootstrap::save_user_settings,
+            bootstrap::ensure_vfs,
+            bootstrap::list_vfs,
+            bootstrap::create_vfs_folder,
+            bootstrap::create_vfs_file,
+            bootstrap::upload_vfs_file,
+            bootstrap::upload_vfs_folder,
+            bootstrap::delete_vfs,
+            bootstrap::download_vfs_file,
+            bootstrap::read_vfs_text,
+            bootstrap::write_vfs_text,
+            bootstrap::move_vfs_to_trash,
+            bootstrap::list_trash,
+            bootstrap::restore_from_trash,
+            bootstrap::delete_trash_permanently,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
