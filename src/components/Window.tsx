@@ -1,14 +1,21 @@
 import { type FC, useRef, useState, useCallback, useEffect } from 'react';
 import type { DesktopApp } from '../data/apps';
+import type { UserSettings } from '../types/settings';
 import iconSvgs from '../data/icons';
 import FileManager from './FileManager';
 import RecycleBin from './RecycleBin';
 import TextEditor from './TextEditor';
+import Settings from './Settings';
+import MyAccount from './MyAccount';
 
 interface WindowProps {
   app: DesktopApp;
+  accessKey?: string | null;
+  settings?: UserSettings | null;
+  onUpdateSettings?: (patch: Partial<UserSettings>) => void;
   filePath?: string;
   fileName?: string;
+  initialPath?: string[];
   onClose: () => void;
   onFocus: () => void;
   onMinimize: () => void;
@@ -17,6 +24,7 @@ interface WindowProps {
   zIndex: number;
   onOpenApp?: (appId: string) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
+  onOpenFileManagerAt?: (initialPath: string[]) => void;
 }
 
 type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -24,7 +32,7 @@ type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 const MIN_W = 300;
 const MIN_H = 200;
 
-const Window: FC<WindowProps> = ({ app, filePath, fileName, onClose, onFocus, onMinimize, onMaximize, isMaximized, zIndex, onOpenApp, onOpenFile }) => {
+const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, filePath, fileName, initialPath, onClose, onFocus, onMinimize, onMaximize, isMaximized, zIndex, onOpenApp, onOpenFile, onOpenFileManagerAt }) => {
   const [isDirty, setIsDirty] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [pos, setPos] = useState(() => ({
@@ -154,7 +162,7 @@ const Window: FC<WindowProps> = ({ app, filePath, fileName, onClose, onFocus, on
       >
         <div className="window-titlebar-left">
           <span style={{ display: 'flex', alignItems: 'center', width: 16, height: 16, flexShrink: 0 }}>
-            {iconSvgs[app.icon] || (
+            {iconSvgs[app.id === 'file-editor' ? 'file' : app.icon] || (
               <svg viewBox="0 0 64 64" fill="none" style={{ width: '100%', height: '100%' }}>
                 <rect x="8" y="8" width="48" height="48" rx="4" fill="#667788" />
               </svg>
@@ -219,9 +227,19 @@ const Window: FC<WindowProps> = ({ app, filePath, fileName, onClose, onFocus, on
 
       <div className="window-body">
         {app.id === 'file-manager' ? (
-          <FileManager onOpenApp={onOpenApp} onOpenFile={onOpenFile} />
+          <FileManager onOpenApp={onOpenApp} onOpenFile={onOpenFile} onOpenFileManagerAt={onOpenFileManagerAt} initialPath={initialPath} />
         ) : app.id === 'recycle-bin' ? (
           <RecycleBin />
+        ) : app.id === 'settings' ? (
+          <Settings />
+        ) : app.id === 'my-account' ? (
+          <MyAccount
+            accessKey={accessKey ?? null}
+            settings={settings ?? null}
+            onUpdateSettings={onUpdateSettings ?? (() => {})}
+          />
+        ) : app.id === 'settings' ? (
+          <Settings />
         ) : app.id === 'file-editor' && filePath && fileName ? (
           <TextEditor
             filePath={filePath}

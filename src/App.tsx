@@ -1,6 +1,7 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { wallpapers, defaultWallpaperId } from './data/wallpapers';
+import { invoke } from '@tauri-apps/api/core';
+import { getWallpaperBackground, defaultWallpaperId } from './data/wallpapers';
 import { desktopApps, type DesktopApp } from './data/apps';
 import { useSettings } from './hooks/useSettings';
 import Desktop from './components/Desktop';
@@ -15,6 +16,7 @@ interface OpenWindow {
   zIndex: number;
   filePath?: string;
   fileName?: string;
+  initialPath?: string[];
 }
 
 const FILE_EDITOR_APP: DesktopApp = {
@@ -30,15 +32,45 @@ function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [accessKey, setAccessKey] = useState<string | null>(null);
   const { settings, updateSettings } = useSettings(accessKey);
-  const wallpaperId = settings?.wallpaperId ?? defaultWallpaperId;
   const [openWindows, setOpenWindows] = useState<OpenWindow[]>([]);
+  const [customWallpaperUrl, setCustomWallpaperUrl] = useState<string | null>(null);
+
+  const desktopBackground = getWallpaperBackground(settings);
   const [activeWindowId, setActiveWindowId] = useState<string | null>(null);
   const [minimizedIds, setMinimizedIds] = useState<Set<string>>(new Set());
   const [maximizedId, setMaximizedId] = useState<string | null>(null);
   const zIndexCounter = useRef(10);
 
-  const currentWallpaper =
-    wallpapers.find((w) => w.id === wallpaperId) ?? wallpapers[0];
+  useEffect(() => {
+    const handler = (e: MouseEvent) => e.preventDefault();
+    document.addEventListener('contextmenu', handler);
+    return () => document.removeEventListener('contextmenu', handler);
+  }, []);
+
+  useEffect(() => {
+    invoke<string>('get_app_version').then((v) => {
+      getCurrentWindow().setTitle(`MOS — 基于 MinIO 的云桌面 v${v}`);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (settings?.wallpaperType === 'custom' && settings?.customWallpapers?.length) {
+      const cw = settings.customWallpapers.find(w => w.id === settings.wallpaperId);
+      if (cw) {
+        invoke<number[]>('read_config_file', { key: cw.key.replace('config/', '') })
+          .then(data => {
+            const blob = new Blob([new Uint8Array(data)]);
+            const url = URL.createObjectURL(blob);
+            setCustomWallpaperUrl(url);
+          })
+          .catch(() => setCustomWallpaperUrl(null));
+      } else {
+        setCustomWallpaperUrl(null);
+      }
+    } else {
+      setCustomWallpaperUrl(null);
+    }
+  }, [settings?.wallpaperType, settings?.wallpaperId, settings?.customWallpapers]);
 
   const openApp = useCallback(
     (appId: string) => {
@@ -101,6 +133,42 @@ function App() {
           zIndex: zIndexCounter.current,
           filePath,
           fileName,
+        },
+      ]);
+      setActiveWindowId(windowId);
+    },
+    [openWindows],
+  );
+
+  const openFileManagerAt = useCallback(
+    (initialPath: string[]) => {
+      const app = desktopApps.find((a) => a.id === 'file-manager');
+      if (!app) return;
+      const windowId = `file-manager-${initialPath.join('/')}`;
+      const existing = openWindows.find((w) => w.id === windowId);
+      if (existing) {
+        setMinimizedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(windowId);
+          return next;
+        });
+        zIndexCounter.current += 1;
+        setOpenWindows((prev) =>
+          prev.map((w) =>
+            w.id === windowId ? { ...w, zIndex: zIndexCounter.current, initialPath } : w,
+          ),
+        );
+        setActiveWindowId(windowId);
+        return;
+      }
+      zIndexCounter.current += 1;
+      setOpenWindows((prev) => [
+        ...prev,
+        {
+          id: windowId,
+          app: { ...app, title: initialPath[initialPath.length - 1] || app.title },
+          zIndex: zIndexCounter.current,
+          initialPath,
         },
       ]);
       setActiveWindowId(windowId);
@@ -172,6 +240,14 @@ function App() {
     setMaximizedId(null);
   }, []);
 
+  const handleOpenSettings = useCallback(() => {
+    openApp('settings');
+  }, [openApp]);
+
+  const handleOpenMyAccount = useCallback(() => {
+    openApp('my-account');
+  }, [openApp]);
+
   const handleExit = useCallback(() => {
     console.log('[App] handleExit called, attempting getCurrentWindow().close()');
     try {
@@ -207,10 +283,15 @@ function App() {
         onShowDesktop={showDesktop}
         onLogout={handleLogout}
         onExit={handleExit}
+        onOpenSettings={handleOpenSettings}
+        onOpenMyAccount={handleOpenMyAccount}
+        accessKey={accessKey}
       />
 
       <Desktop
-        currentWallpaper={currentWallpaper}
+        background={desktopBackground}
+        wallpaperId={settings?.wallpaperId ?? defaultWallpaperId}
+        customWallpaperUrl={customWallpaperUrl}
         desktopApps={desktopApps}
         onOpenApp={openApp}
         onWallpaperChange={(id) => updateSettings({ wallpaperId: id })}
@@ -220,6 +301,9 @@ function App() {
         <Window
           key={w.id}
           app={w.app}
+          accessKey={accessKey}
+          settings={settings}
+          onUpdateSettings={updateSettings}
           filePath={w.filePath}
           fileName={w.fileName}
           onClose={() => closeApp(w.id)}
@@ -228,8 +312,10 @@ function App() {
           onMaximize={() => toggleMaximize(w.id)}
           isMaximized={maximizedId === w.id}
           zIndex={w.zIndex}
+          initialPath={w.initialPath}
           onOpenApp={openApp}
           onOpenFile={openFile}
+          onOpenFileManagerAt={openFileManagerAt}
         />
       ))}
     </div>

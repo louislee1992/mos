@@ -10,14 +10,18 @@
  */
 
 import { type FC, useState } from 'react';
-import { type Wallpaper, wallpapers } from '../data/wallpapers';
+import { wallpapers } from '../data/wallpapers';
 import DesktopIcon from './DesktopIcon';
 import type { DesktopApp } from '../data/apps';
 
 /** 组件 Props */
 interface DesktopProps {
-  /** 当前选中的壁纸对象 */
-  currentWallpaper: Wallpaper;
+  /** 背景 CSS 字符串 */
+  background: string;
+  /** 当前选中的壁纸 ID */
+  wallpaperId?: string;
+  /** 自定义壁纸图片 URL */
+  customWallpaperUrl?: string | null;
   /** 桌面上的应用程序列表 */
   desktopApps: DesktopApp[];
   /** 打开应用的统一回调，传入 appId */
@@ -34,7 +38,9 @@ interface DesktopProps {
  * 不需要额外的 img 元素。
  */
 const Desktop: FC<DesktopProps> = ({
-  currentWallpaper,
+  background,
+  wallpaperId,
+  customWallpaperUrl,
   desktopApps,
   onOpenApp,
   onWallpaperChange,
@@ -44,20 +50,31 @@ const Desktop: FC<DesktopProps> = ({
 
   return (
     <div
-      className="flex-1 relative overflow-hidden"
-      style={{ background: currentWallpaper.background }}
+      className="desktop-area"
+      style={{ background }}
       onContextMenu={(e) => {
         // 阻止浏览器默认右键菜单，切换壁纸选择器
         e.preventDefault();
         setShowPicker(!showPicker);
       }}
     >
+      {customWallpaperUrl && (
+        <img
+          src={customWallpaperUrl}
+          style={{
+            position: 'absolute', inset: 0,
+            width: '100%', height: '100%',
+            objectFit: 'cover', zIndex: 0, pointerEvents: 'none',
+          }}
+          alt="自定义壁纸"
+        />
+      )}
       {/* ==================== 桌面图标区 ====================
           排列在左上角，纵向列表布局，间距为 20px。
           遍历 desktopApps 数组，每个 app 渲染一个 DesktopIcon 组件。
           双击时调用 onOpenApp(app.id) 打开/聚焦对应窗口。
       */}
-      <div className="absolute top-6 left-6 flex flex-col gap-5">
+      <div className="desktop-icons">
         {desktopApps.map((app) => (
           <DesktopIcon
             key={app.id}
@@ -75,7 +92,7 @@ const Desktop: FC<DesktopProps> = ({
       */}
       {showPicker && (
         <div
-          className="absolute bottom-6 left-1/2 -translate-x-1/2 flex gap-2 p-2 rounded-xl z-50"
+          className="desktop-pagination"
           style={{
             background: 'rgba(0,0,0,0.55)',
             backdropFilter: 'blur(16px)',
@@ -89,17 +106,17 @@ const Desktop: FC<DesktopProps> = ({
                 onWallpaperChange(wp.id);
                 setShowPicker(false);
               }}
-              className="w-10 h-6 rounded-md border-2 transition-all hover:scale-110 cursor-pointer flex-shrink-0"
+              className="wallpaper-dot"
               style={{
                 // 色块背景使用壁纸的 CSS 渐变
                 background: wp.background,
                 // 当前选中壁纸：白色粗边框 + 发光阴影
                 borderColor:
-                  wp.id === currentWallpaper.id
+                  wp.id === wallpaperId
                     ? 'rgba(255,255,255,0.9)'
                     : 'rgba(255,255,255,0.2)',
                 boxShadow:
-                  wp.id === currentWallpaper.id
+                  wp.id === wallpaperId
                     ? '0 0 8px rgba(255,255,255,0.4)'
                     : 'none',
               }}
@@ -111,7 +128,7 @@ const Desktop: FC<DesktopProps> = ({
 
       {/* 壁纸选择器提示文字 */}
       {showPicker && (
-        <p className="absolute bottom-20 left-1/2 -translate-x-1/2 text-white/50 text-xs">
+        <p className="desktop-pagination-hint">
           右键桌面空白处可关闭壁纸选择 — 点击色块切换壁纸
         </p>
       )}
