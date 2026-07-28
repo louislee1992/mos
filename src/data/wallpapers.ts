@@ -1,3 +1,5 @@
+import type { UserSettings } from '../types/settings';
+
 /**
  * 壁纸配置文件
  *
@@ -72,3 +74,28 @@ export const wallpapers: Wallpaper[] = [
 
 /** 系统默认壁纸 ID，首次加载时使用 */
 export const defaultWallpaperId = 'monterey';
+
+/**
+ * 根据用户设置解析 CSS background 字符串
+ *
+ * - preset：从预设壁纸列表中查找
+ * - solid：使用纯色
+ * - custom：目前回退到预设壁纸（后续任务实现自定义上传）
+ */
+export function getWallpaperBackground(
+  settings: UserSettings | null | undefined,
+): string {
+  if (!settings || settings.wallpaperType === 'preset') {
+    const wp = wallpapers.find(
+      (w) => w.id === (settings?.wallpaperId ?? defaultWallpaperId),
+    );
+    return wp?.background ?? wallpapers[0].background;
+  }
+  if (settings.wallpaperType === 'solid') {
+    return settings.solidColor || '#1a1a2e';
+  }
+  const wp = wallpapers.find(
+    (w) => w.id === (settings.wallpaperId ?? defaultWallpaperId),
+  );
+  return wp?.background ?? wallpapers[0].background;
+}
