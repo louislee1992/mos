@@ -22,14 +22,20 @@ pub struct CustomWallpaper {
     pub key: String,
 }
 
+fn default_wallpaper_type() -> String { "preset".into() }
+fn default_solid_color() -> String { "#1a1a2e".into() }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct UserSettings {
     pub version: u32,
     pub updated_at: i64,
     pub wallpaper_id: String,
+    #[serde(default = "default_wallpaper_type")]
     pub wallpaper_type: String,
+    #[serde(default = "default_solid_color")]
     pub solid_color: String,
+    #[serde(default)]
     pub custom_wallpapers: Vec<CustomWallpaper>,
     pub desktop_icon_order: Vec<String>,
     pub theme: String,
@@ -66,8 +72,9 @@ pub struct DeviceInfo {
 
 #[tauri::command]
 pub async fn get_device_info() -> Result<DeviceInfo, String> {
-    let os_name = os_info::get().os_type().to_string();
-    let os_version = os_info::get().version().to_string();
+    let info = os_info::get();
+    let os_name = info.os_type().to_string();
+    let os_version = info.version().to_string();
     let hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "unknown".into());
