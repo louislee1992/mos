@@ -6,6 +6,13 @@ export interface WindowState {
   height: number;
 }
 
+export interface DeviceInfo {
+  osName: string;
+  osVersion: string;
+  hostname: string;
+  localIp: string;
+}
+
 export interface CustomWallpaper {
   id: string;       // uuid
   name: string;     // original filename
