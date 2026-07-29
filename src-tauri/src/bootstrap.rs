@@ -1,8 +1,10 @@
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::State;
+use tauri::{Emitter, State};
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -88,7 +90,7 @@ pub fn derive_bucket_name(access_key: &str) -> String {
     format!("{}-os", access_key.to_lowercase().replace('_', "-"))
 }
 
-fn build_s3_client(endpoint: &str, access_key: &str, secret_key: &str) -> Client {
+pub fn build_s3_client(endpoint: &str, access_key: &str, secret_key: &str) -> Client {
     let creds = Credentials::new(access_key, secret_key, None, None, "minio");
     let config = aws_sdk_s3::Config::builder()
         .credentials_provider(creds)
@@ -587,9 +589,11 @@ pub async fn create_vfs_file(
 
 #[tauri::command]
 pub async fn upload_vfs_file(
+    app: tauri::AppHandle,
     state: State<'_, crate::AppState>,
     local_path: String,
     vfs_folder: String,
+    task_id: String,
 ) -> Result<(), String> {
     let (endpoint, access_key, secret_key) = {
         let minio = state.minio.lock().map_err(|e| e.to_string())?;
@@ -601,27 +605,136 @@ pub async fn upload_vfs_file(
         )
     };
 
-    let data = tokio::fs::read(&local_path)
+    let metadata = tokio::fs::metadata(&local_path)
         .await
-        .map_err(|e| format!("读取文件失败: {}", e))?;
+        .map_err(|e| format!("读取文件信息失败: {}", e))?;
+    let total = metadata.len() as i64;
 
     let filename = std::path::Path::new(&local_path)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
+        .unwrap_or("unknown")
+        .to_string();
 
     let client = build_s3_client(&endpoint, &access_key, &secret_key);
     let bucket = derive_bucket_name(&access_key);
-    let key = format!("vfs/{}/{}", vfs_folder.trim_end_matches('/'), filename);
+    let folder = vfs_folder.trim_end_matches('/');
+    let key = if folder.is_empty() {
+        format!("vfs/{}", filename)
+    } else {
+        format!("vfs/{}/{}", folder, filename)
+    };
 
-    client
-        .put_object()
+    let data = tokio::fs::read(&local_path)
+        .await
+        .map_err(|e| format!("读取文件失败: {}", e))?;
+
+    // small file: single put with progress
+    if data.len() <= CHUNK_SIZE {
+        client
+            .put_object()
+            .bucket(&bucket)
+            .key(&key)
+            .body(data.clone().into())
+            .send()
+            .await
+            .map_err(|e| format!("上传文件失败: {}", e))?;
+
+        let _ = app.emit("transfer-progress", TransferProgress {
+            task_id: task_id.clone(),
+            transferred_bytes: total,
+            total_bytes: total,
+            status: "completed".into(),
+            error: None,
+        });
+        println!("[vfs] uploaded: {}", key);
+        return Ok(());
+    }
+
+    // multipart upload for large files
+    let create = client
+        .create_multipart_upload()
         .bucket(&bucket)
         .key(&key)
-        .body(data.into())
         .send()
         .await
-        .map_err(|e| format!("上传文件失败: {}", e))?;
+        .map_err(|e| format!("创建分片上传失败: {}", e))?;
+
+    let upload_id = create.upload_id().ok_or("缺少 upload_id")?.to_string();
+    let mut parts: Vec<aws_sdk_s3::types::CompletedPart> = vec![];
+    let mut transferred: i64 = 0;
+
+    for (i, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
+        let part_number = (i + 1) as i32;
+        let chunk_vec = chunk.to_vec();
+
+        let upload_res = client
+            .upload_part()
+            .bucket(&bucket)
+            .key(&key)
+            .upload_id(&upload_id)
+            .part_number(part_number)
+            .body(ByteStream::from(chunk_vec))
+            .send()
+            .await
+            .map_err(|e| {
+                let _ = app.emit("transfer-progress", TransferProgress {
+                    task_id: task_id.clone(),
+                    transferred_bytes: transferred,
+                    total_bytes: total,
+                    status: "failed".into(),
+                    error: Some(format!("上传分片失败: {}", e)),
+                });
+                format!("上传分片 {} 失败: {}", part_number, e)
+            })?;
+
+        transferred += chunk.len() as i64;
+        parts.push(
+            aws_sdk_s3::types::CompletedPart::builder()
+                .part_number(part_number)
+                .e_tag(upload_res.e_tag().unwrap_or("").to_string())
+                .build(),
+        );
+
+        let _ = app.emit("transfer-progress", TransferProgress {
+            task_id: task_id.clone(),
+            transferred_bytes: transferred,
+            total_bytes: total,
+            status: "transferring".into(),
+            error: None,
+        });
+    }
+
+    client
+        .complete_multipart_upload()
+        .bucket(&bucket)
+        .key(&key)
+        .upload_id(&upload_id)
+        .multipart_upload(
+            aws_sdk_s3::types::CompletedMultipartUpload::builder()
+                .set_parts(Some(parts))
+                .build(),
+        )
+        .send()
+        .await
+        .map_err(|e| {
+            let _ = app.emit("transfer-progress", TransferProgress {
+                task_id: task_id.clone(),
+                transferred_bytes: transferred,
+                total_bytes: total,
+                status: "failed".into(),
+                error: Some(format!("完成分片上传失败: {}", e)),
+            });
+            format!("完成分片上传失败: {}", e)
+        })?;
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        task_id: task_id.clone(),
+        transferred_bytes: total,
+        total_bytes: total,
+        status: "completed".into(),
+        error: None,
+    });
     println!("[vfs] uploaded: {}", key);
     Ok(())
 }
@@ -780,24 +893,22 @@ pub async fn delete_vfs(
 
     if is_directory {
         let prefix = format!("vfs/{}/", path.trim_end_matches('/'));
+        let mut continuation_token: Option<String> = None;
         loop {
-            let resp = client
+            let mut req = client
                 .list_objects_v2()
                 .bucket(&bucket)
-                .prefix(&prefix)
-                .send()
-                .await
-                .map_err(|e| format!("列出对象失败: {}", e))?;
+                .prefix(&prefix);
+            if let Some(ref token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+            let resp = req.send().await.map_err(|e| format!("列出对象失败: {}", e))?;
 
             let objects: Vec<_> = resp
                 .contents()
                 .iter()
                 .filter_map(|o| o.key().map(|k| k.to_string()))
                 .collect();
-
-            if objects.is_empty() {
-                break;
-            }
 
             for key in &objects {
                 client
@@ -807,6 +918,12 @@ pub async fn delete_vfs(
                     .send()
                     .await
                     .map_err(|e| format!("删除 {} 失败: {}", key, e))?;
+            }
+
+            if !resp.is_truncated().unwrap_or(false) { break; }
+            match resp.next_continuation_token() {
+                Some(token) if !token.is_empty() => continuation_token = Some(token.to_string()),
+                _ => break,
             }
         }
     } else {
@@ -1147,9 +1264,11 @@ pub async fn delete_trash_permanently(
 
 #[tauri::command]
 pub async fn download_vfs_file(
+    app: tauri::AppHandle,
     state: State<'_, crate::AppState>,
     vfs_path: String,
     local_path: String,
+    task_id: String,
 ) -> Result<(), String> {
     let (endpoint, access_key, secret_key) = {
         let minio = state.minio.lock().map_err(|e| e.to_string())?;
@@ -1173,16 +1292,59 @@ pub async fn download_vfs_file(
         .await
         .map_err(|e| format!("下载文件失败: {}", e))?;
 
-    let bytes = resp
-        .body
-        .collect()
+    let total = resp.content_length().unwrap_or(0);
+    let mut body = resp.body;
+    let mut file = tokio::fs::File::create(&local_path)
         .await
-        .map_err(|e| format!("读取文件内容失败: {}", e))?;
+        .map_err(|e| format!("创建文件失败: {}", e))?;
+    let mut transferred: i64 = 0;
 
-    tokio::fs::write(&local_path, bytes.to_vec())
-        .await
-        .map_err(|e| format!("保存文件失败: {}", e))?;
+    loop {
+        let n = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            body.next(),
+        ).await {
+            Ok(Some(Ok(bytes))) => {
+                let len = bytes.len();
+                if len == 0 { break; }
+                file.write_all(&bytes).await.map_err(|e| format!("写入文件失败: {}", e))?;
+                len
+            }
+            Ok(Some(Err(e))) => {
+                let _ = app.emit("transfer-progress", TransferProgress {
+                    task_id: task_id.clone(),
+                    transferred_bytes: transferred,
+                    total_bytes: total,
+                    status: "failed".into(),
+                    error: Some(format!("读取数据失败: {}", e)),
+                });
+                return Err(format!("下载失败: {}", e));
+            }
+            Ok(None) => break,
+            Err(_) => {
+                return Err("下载超时".into());
+            }
+        };
 
+        transferred += n as i64;
+        let _ = app.emit("transfer-progress", TransferProgress {
+            task_id: task_id.clone(),
+            transferred_bytes: transferred,
+            total_bytes: total,
+            status: "transferring".into(),
+            error: None,
+        });
+    }
+
+    file.flush().await.map_err(|e| format!("刷新文件失败: {}", e))?;
+
+    let _ = app.emit("transfer-progress", TransferProgress {
+        task_id: task_id.clone(),
+        transferred_bytes: total,
+        total_bytes: total,
+        status: "completed".into(),
+        error: None,
+    });
     println!("[vfs] downloaded: {} -> {}", key, local_path);
     Ok(())
 }
@@ -1209,6 +1371,98 @@ pub async fn copy_vfs_object(
 
     if is_directory {
         let src_prefix = format!("vfs/{}/", source_path.trim_end_matches('/'));
+        let mut continuation_token: Option<String> = None;
+        loop {
+            let mut req = client
+                .list_objects_v2()
+                .bucket(&bucket)
+                .prefix(&src_prefix);
+            if let Some(ref token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+            let resp = req.send().await.map_err(|e| format!("列出对象失败: {}", e))?;
+
+            let objects: Vec<_> = resp
+                .contents()
+                .iter()
+                .filter_map(|o| o.key().map(|k| k.to_string()))
+                .collect();
+
+            for key in &objects {
+                let relative = key.strip_prefix("vfs/").unwrap_or("");
+                let name_part = relative.strip_prefix(&format!("{}/", source_path.trim_end_matches('/'))).unwrap_or(relative);
+                let dest_key = if key.ends_with('/') {
+                    let name_trimmed = name_part.trim_end_matches('/');
+                    if name_trimmed.is_empty() {
+                        format!("vfs/{}/", dest_path.trim_end_matches('/'))
+                    } else {
+                        format!("vfs/{}/{}/", dest_path.trim_end_matches('/'), name_trimmed)
+                    }
+                } else {
+                    format!("vfs/{}/{}", dest_path.trim_end_matches('/'), name_part)
+                };
+                if key.ends_with('/') {
+                    client.put_object().bucket(&bucket).key(&dest_key).body(vec![].into()).send().await.map_err(|e| format!("创建目录失败: {}", e))?;
+                } else {
+                    client.copy_object().bucket(&bucket).copy_source(format!("/{}/{}", bucket, key)).key(&dest_key).send().await.map_err(|e| format!("复制对象失败: {}", e))?;
+                }
+            }
+
+            if !resp.is_truncated().unwrap_or(false) { break; }
+            match resp.next_continuation_token() {
+                Some(token) if !token.is_empty() => continuation_token = Some(token.to_string()),
+                _ => break,
+            }
+        }
+    } else {
+        let src_key = format!("vfs/{}", source_path.trim_start_matches('/'));
+        let dest_key = format!("vfs/{}", dest_path.trim_start_matches('/'));
+        client
+            .copy_object()
+            .bucket(&bucket)
+            .copy_source(format!("/{}/{}", bucket, src_key))
+            .key(&dest_key)
+            .send()
+            .await
+            .map_err(|e| format!("复制文件失败: {}", e))?;
+    }
+
+    println!("[vfs] copied: {} -> {}", source_path, dest_path);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn rename_vfs(
+    state: State<'_, crate::AppState>,
+    source_path: String,
+    new_name: String,
+    is_directory: bool,
+) -> Result<(), String> {
+    let parent = source_path.rsplit_once('/')
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_default();
+    let dest_path = if parent.is_empty() {
+        new_name
+    } else {
+        format!("{}/{}", parent, new_name)
+    };
+
+    let (endpoint, access_key, secret_key) = {
+        let minio = state.minio.lock().map_err(|e| e.to_string())?;
+        let cfg = minio.as_ref().ok_or("未登录")?;
+        (
+            cfg.endpoint.clone(),
+            cfg.access_key.clone(),
+            cfg.secret_key.clone(),
+        )
+    };
+
+    let client = build_s3_client(&endpoint, &access_key, &secret_key);
+    let bucket = derive_bucket_name(&access_key);
+
+    if is_directory {
+        let src_prefix = format!("vfs/{}/", source_path.trim_end_matches('/'));
+        let dest_prefix = format!("vfs/{}/", dest_path.trim_end_matches('/'));
         loop {
             let resp = client
                 .list_objects_v2()
@@ -1227,18 +1481,23 @@ pub async fn copy_vfs_object(
             if objects.is_empty() { break; }
 
             for key in &objects {
-                let relative = key.strip_prefix("vfs/").unwrap_or("");
-                let name_part = relative.strip_prefix(&format!("{}/", source_path.trim_end_matches('/'))).unwrap_or(relative);
-                let dest_key = if key.ends_with('/') {
-                    format!("vfs/{}/{}/", dest_path.trim_end_matches('/'), name_part.trim_end_matches('/'))
-                } else {
-                    format!("vfs/{}/{}", dest_path.trim_end_matches('/'), name_part)
-                };
-                if key.ends_with('/') {
-                    client.put_object().bucket(&bucket).key(&dest_key).body(vec![].into()).send().await.map_err(|e| format!("创建目录失败: {}", e))?;
-                } else {
-                    client.copy_object().bucket(&bucket).copy_source(format!("/{}/{}", bucket, key)).key(&dest_key).send().await.map_err(|e| format!("复制对象失败: {}", e))?;
-                }
+                let relative = key.strip_prefix(&src_prefix).unwrap_or("");
+                let dest_key = format!("{}{}", dest_prefix, relative);
+                client
+                    .copy_object()
+                    .bucket(&bucket)
+                    .copy_source(format!("/{}/{}", bucket, key))
+                    .key(&dest_key)
+                    .send()
+                    .await
+                    .map_err(|e| format!("复制失败: {}", e))?;
+                client
+                    .delete_object()
+                    .bucket(&bucket)
+                    .key(key)
+                    .send()
+                    .await
+                    .map_err(|e| format!("删除失败: {}", e))?;
             }
         }
     } else {
@@ -1251,10 +1510,17 @@ pub async fn copy_vfs_object(
             .key(&dest_key)
             .send()
             .await
-            .map_err(|e| format!("复制文件失败: {}", e))?;
+            .map_err(|e| format!("重命名失败: {}", e))?;
+        client
+            .delete_object()
+            .bucket(&bucket)
+            .key(&src_key)
+            .send()
+            .await
+            .map_err(|e| format!("删除原文件失败: {}", e))?;
     }
 
-    println!("[vfs] copied: {} -> {}", source_path, dest_path);
+    println!("[vfs] renamed: {} -> {}", source_path, dest_path);
     Ok(())
 }
 
@@ -1325,6 +1591,218 @@ pub async fn write_vfs_text(
 
     println!("[vfs] text saved: {}", key);
     Ok(())
+}
+
+// ── Login History ───────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginRecord {
+    pub timestamp: i64,
+    pub ip: String,
+    pub os_name: String,
+    pub os_version: String,
+    pub hostname: String,
+}
+
+#[tauri::command]
+pub async fn record_login_history(
+    state: State<'_, crate::AppState>,
+    ip: String,
+    os_name: String,
+    os_version: String,
+    hostname: String,
+) -> Result<(), String> {
+    let (endpoint, access_key, secret_key) = {
+        let minio = state.minio.lock().map_err(|e| e.to_string())?;
+        let cfg = minio.as_ref().ok_or("未登录")?;
+        (
+            cfg.endpoint.clone(),
+            cfg.access_key.clone(),
+            cfg.secret_key.clone(),
+        )
+    };
+
+    let client = build_s3_client(&endpoint, &access_key, &secret_key);
+    let bucket = derive_bucket_name(&access_key);
+    let history_key = "config/login-history.json";
+
+    let mut entries: Vec<LoginRecord> = match client
+        .get_object()
+        .bucket(&bucket)
+        .key(history_key)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let bytes = resp.body.collect().await.map_err(|e| format!("读取登录历史失败: {}", e))?;
+            let json = String::from_utf8(bytes.to_vec()).map_err(|e| format!("登录历史编码错误: {}", e))?;
+            serde_json::from_str(&json).unwrap_or_default()
+        }
+        Err(_) => vec![],
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
+    entries.insert(0, LoginRecord {
+        timestamp: now,
+        ip,
+        os_name,
+        os_version,
+        hostname,
+    });
+
+    if entries.len() > 10 {
+        entries.truncate(10);
+    }
+
+    let json = serde_json::to_string(&entries).map_err(|e| e.to_string())?;
+    client
+        .put_object()
+        .bucket(&bucket)
+        .key(history_key)
+        .body(json.as_bytes().to_vec().into())
+        .send()
+        .await
+        .map_err(|e| format!("保存登录历史失败: {}", e))?;
+
+    println!("[login-history] recorded");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn list_login_history(
+    state: State<'_, crate::AppState>,
+) -> Result<Vec<LoginRecord>, String> {
+    let (endpoint, access_key, secret_key) = {
+        let minio = state.minio.lock().map_err(|e| e.to_string())?;
+        let cfg = minio.as_ref().ok_or("未登录")?;
+        (
+            cfg.endpoint.clone(),
+            cfg.access_key.clone(),
+            cfg.secret_key.clone(),
+        )
+    };
+
+    let client = build_s3_client(&endpoint, &access_key, &secret_key);
+    let bucket = derive_bucket_name(&access_key);
+    let history_key = "config/login-history.json";
+
+    match client
+        .get_object()
+        .bucket(&bucket)
+        .key(history_key)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let bytes = resp.body.collect().await.map_err(|e| format!("读取登录历史失败: {}", e))?;
+            let json = String::from_utf8(bytes.to_vec()).map_err(|e| format!("登录历史编码错误: {}", e))?;
+            let entries: Vec<LoginRecord> = serde_json::from_str(&json).unwrap_or_default();
+            Ok(entries)
+        }
+        Err(_) => Ok(vec![]),
+    }
+}
+
+// ── Transfer Tasks ──────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferTask {
+    pub id: String,
+    pub file_name: String,
+    pub vfs_path: String,
+    pub direction: String, // "upload" | "download"
+    pub total_bytes: i64,
+    pub transferred_bytes: i64,
+    pub status: String, // "transferring" | "completed" | "failed"
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferProgress {
+    pub task_id: String,
+    pub transferred_bytes: i64,
+    pub total_bytes: i64,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
+
+#[tauri::command]
+pub async fn save_transfer_tasks(
+    state: State<'_, crate::AppState>,
+    tasks_json: String,
+) -> Result<(), String> {
+    let (endpoint, access_key, secret_key) = {
+        let minio = state.minio.lock().map_err(|e| e.to_string())?;
+        let cfg = minio.as_ref().ok_or("未登录")?;
+        (
+            cfg.endpoint.clone(),
+            cfg.access_key.clone(),
+            cfg.secret_key.clone(),
+        )
+    };
+
+    let client = build_s3_client(&endpoint, &access_key, &secret_key);
+    let bucket = derive_bucket_name(&access_key);
+
+    client
+        .put_object()
+        .bucket(&bucket)
+        .key("config/transfers.json")
+        .body(tasks_json.as_bytes().to_vec().into())
+        .send()
+        .await
+        .map_err(|e| format!("保存传输任务失败: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn load_transfer_tasks(
+    state: State<'_, crate::AppState>,
+) -> Result<Vec<TransferTask>, String> {
+    let (endpoint, access_key, secret_key) = {
+        let minio = state.minio.lock().map_err(|e| e.to_string())?;
+        let cfg = minio.as_ref().ok_or("未登录")?;
+        (
+            cfg.endpoint.clone(),
+            cfg.access_key.clone(),
+            cfg.secret_key.clone(),
+        )
+    };
+
+    let client = build_s3_client(&endpoint, &access_key, &secret_key);
+    let bucket = derive_bucket_name(&access_key);
+
+    match client
+        .get_object()
+        .bucket(&bucket)
+        .key("config/transfers.json")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let bytes = resp
+                .body
+                .collect()
+                .await
+                .map_err(|e| format!("读取传输任务失败: {}", e))?;
+            let json =
+                String::from_utf8(bytes.to_vec()).map_err(|e| format!("传输任务编码错误: {}", e))?;
+            let tasks: Vec<TransferTask> = serde_json::from_str(&json).unwrap_or_default();
+            Ok(tasks)
+        }
+        Err(_) => Ok(vec![]),
+    }
 }
 
 // ── File History ────────────────────────────────────

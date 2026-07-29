@@ -1,15 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use aws_credential_types::Credentials as AwsCredentials;
 use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
 use aws_sdk_s3::Client;
-use aws_smithy_runtime_api::client::identity::Identity;
 use std::sync::Mutex;
-use std::time::SystemTime;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 mod accounts;
 mod bootstrap;
+mod chat;
 
 pub struct MinioConfig {
     pub endpoint: String,
@@ -107,65 +105,23 @@ fn get_app_version() -> String {
 }
 
 #[tauri::command]
-async fn check_admin_access(
+fn check_admin_access(
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
-    let (endpoint, access_key, secret_key) = {
+    let access_key = {
         let minio = state.minio.lock().map_err(|e| e.to_string())?;
         let cfg = minio.as_ref().ok_or("未登录")?;
-        (
-            cfg.endpoint.clone(),
-            cfg.access_key.clone(),
-            cfg.secret_key.clone(),
-        )
+        cfg.access_key.clone()
     };
 
-    let url = format!("{}/minio/admin/v3/users", endpoint.trim_end_matches('/'));
-
-    let (instructions, _sig) = {
-        let creds = AwsCredentials::new(&access_key, &secret_key, None, None, "minio");
-        let identity = Identity::new(creds, None);
-        let mut builder = aws_sigv4::sign::v4::SigningParams::builder();
-        builder.set_identity(Some(&identity));
-        builder.set_region(Some("us-east-1"));
-        builder.set_name(Some("s3"));
-        builder.set_time(Some(SystemTime::now()));
-        builder.set_settings(Some(aws_sigv4::http_request::SigningSettings::default()));
-        let signing_params: aws_sigv4::http_request::SigningParams = builder
-            .build()
-            .map_err(|e| format!("构建签名参数失败: {}", e))?
-            .into();
-
-        let signable = aws_sigv4::http_request::SignableRequest::new(
-            "GET",
-            &url,
-            std::iter::empty::<(&str, &str)>(),
-            aws_sigv4::http_request::SignableBody::Bytes(&[]),
-        )
-        .map_err(|e| format!("构建签名请求失败: {}", e))?;
-
-        aws_sigv4::http_request::sign(signable, &signing_params)
-            .map_err(|e| format!("签名失败: {}", e))?
-            .into_parts()
-    };
-
-    let client = reqwest::Client::new();
-    let mut req = client.get(&url);
-    for (name, value) in instructions.headers() {
-        req = req.header(name, value);
-    }
-
-    match req.send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            println!("[check_admin_access] status: {}", status);
-            Ok(status.is_success())
-        }
-        Err(e) => {
-            println!("[check_admin_access] request failed: {}", e);
-            Ok(false)
-        }
-    }
+    let data = crate::accounts::load_accounts(app)?;
+    let is_admin = data
+        .accounts
+        .iter()
+        .any(|a| a.access_key == access_key && a.is_admin);
+    println!("[check_admin_access] access_key={}, is_admin={}", access_key, is_admin);
+    Ok(is_admin)
 }
 
 fn main() {
@@ -175,6 +131,14 @@ fn main() {
         .plugin(tauri_plugin_fs::init())
         .manage(AppState {
             minio: Mutex::new(None),
+        })
+        .manage(chat::ChatState {
+            redis_conn: Mutex::new(None),
+            redis_config: Mutex::new(None),
+            pubsub_handle: Mutex::new(None),
+            heartbeat_handle: Mutex::new(None),
+            current_user: Mutex::new(String::new()),
+            current_bucket: Mutex::new(String::new()),
         })
         .invoke_handler(tauri::generate_handler![
             get_app_version,
@@ -195,10 +159,13 @@ fn main() {
             bootstrap::read_vfs_text,
             bootstrap::write_vfs_text,
             bootstrap::copy_vfs_object,
+            bootstrap::rename_vfs,
             bootstrap::move_vfs_to_trash,
             bootstrap::list_trash,
             bootstrap::restore_from_trash,
             bootstrap::delete_trash_permanently,
+            bootstrap::record_login_history,
+            bootstrap::list_login_history,
             bootstrap::record_file_history,
             bootstrap::list_file_history,
             bootstrap::add_file_favorite,
@@ -209,7 +176,28 @@ fn main() {
             bootstrap::upload_config_file,
             bootstrap::delete_config_file,
             bootstrap::read_config_file,
+            bootstrap::save_transfer_tasks,
+            bootstrap::load_transfer_tasks,
             check_admin_access,
+            chat::connect_redis,
+            chat::disconnect_redis,
+            chat::get_redis_status,
+            chat::heartbeat,
+            chat::get_user_profile,
+            chat::update_user_profile,
+            chat::get_online_users,
+            chat::get_online_access_keys,
+            chat::list_chat_profiles,
+            chat::get_conversations,
+            chat::get_or_create_private_conv,
+            chat::load_conversation,
+            chat::send_message,
+            chat::create_group,
+            chat::add_group_members,
+            chat::capture_screenshot,
+            chat::upload_chat_file,
+            chat::send_cloud_file,
+            chat::download_chat_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

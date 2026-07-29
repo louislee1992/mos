@@ -7,6 +7,7 @@ import RecycleBin from './RecycleBin';
 import TextEditor from './TextEditor';
 import Settings from './Settings';
 import MyAccount from './MyAccount';
+import ChatApp from './ChatApp';
 
 interface WindowProps {
   app: DesktopApp;
@@ -16,6 +17,7 @@ interface WindowProps {
   filePath?: string;
   fileName?: string;
   initialPath?: string[];
+  initialTab?: string;
   onClose: () => void;
   onFocus: () => void;
   onMinimize: () => void;
@@ -25,6 +27,9 @@ interface WindowProps {
   onOpenApp?: (appId: string) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
   onOpenFileManagerAt?: (initialPath: string[]) => void;
+  onAddUploadTask?: (fileName: string, vfsPath: string, totalBytes: number) => string;
+  onAddDownloadTask?: (fileName: string, vfsPath: string, totalBytes: number) => string;
+  onAddMoveTask?: (fileName: string, vfsPath: string, totalBytes: number) => string;
 }
 
 type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -32,7 +37,7 @@ type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 const MIN_W = 300;
 const MIN_H = 200;
 
-const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, filePath, fileName, initialPath, onClose, onFocus, onMinimize, onMaximize, isMaximized, zIndex, onOpenApp, onOpenFile, onOpenFileManagerAt }) => {
+const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, filePath, fileName, initialPath, initialTab, onClose, onFocus, onMinimize, onMaximize, isMaximized, zIndex, onOpenApp, onOpenFile, onOpenFileManagerAt, onAddUploadTask, onAddDownloadTask, onAddMoveTask }) => {
   const [isDirty, setIsDirty] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [pos, setPos] = useState(() => ({
@@ -145,8 +150,8 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
         width: displayWidth,
         height: displayHeight,
         zIndex,
-        background: '#1e1e2e',
-        border: '1px solid rgba(255,255,255,0.08)',
+        background: 'var(--bg-modal)',
+        border: '1px solid var(--border-light)',
         boxShadow: isMaximized ? 'none' : '0 8px 32px rgba(0,0,0,0.5)',
       }}
       onMouseDown={onFocus}
@@ -154,8 +159,8 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
       <div
         className="window-titlebar"
         style={{
-          background: '#252538',
-          borderBottom: '1px solid rgba(255,255,255,0.06)',
+          background: 'var(--bg-window)',
+          borderBottom: '1px solid var(--border-light)',
           cursor: dragging ? 'grabbing' : 'default',
         }}
         onMouseDown={handleMouseDown}
@@ -183,7 +188,7 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
             title="最小化"
           >
             <svg viewBox="0 0 10 10" width="10" height="10">
-              <line x1="1" y1="5" x2="9" y2="5" stroke="#c8c8d4" strokeWidth="1" />
+              <line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" strokeWidth="1" />
             </svg>
           </button>
           <button
@@ -196,12 +201,12 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
           >
             {isMaximized ? (
               <svg viewBox="0 0 10 10" width="10" height="10" fill="none">
-                <rect x="0.5" y="2.5" width="7" height="7" stroke="#c8c8d4" strokeWidth="1" />
-                <path d="M2.5 0.5H9.5V7.5" stroke="#c8c8d4" strokeWidth="1" fill="none" />
+                <rect x="0.5" y="2.5" width="7" height="7" stroke="currentColor" strokeWidth="1" />
+                <path d="M2.5 0.5H9.5V7.5" stroke="currentColor" strokeWidth="1" fill="none" />
               </svg>
             ) : (
               <svg viewBox="0 0 10 10" width="10" height="10" fill="none">
-                <rect x="1.5" y="1.5" width="7" height="7" stroke="#c8c8d4" strokeWidth="1" />
+                <rect x="1.5" y="1.5" width="7" height="7" stroke="currentColor" strokeWidth="1" />
               </svg>
             )}
           </button>
@@ -227,7 +232,7 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
 
       <div className="window-body">
         {app.id === 'file-manager' ? (
-          <FileManager onOpenApp={onOpenApp} onOpenFile={onOpenFile} onOpenFileManagerAt={onOpenFileManagerAt} initialPath={initialPath} />
+          <FileManager onOpenApp={onOpenApp} onOpenFile={onOpenFile} onOpenFileManagerAt={onOpenFileManagerAt} initialPath={initialPath} onAddUploadTask={onAddUploadTask} onAddDownloadTask={onAddDownloadTask} onAddMoveTask={onAddMoveTask} />
         ) : app.id === 'recycle-bin' ? (
           <RecycleBin />
         ) : app.id === 'settings' ? (
@@ -237,9 +242,12 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
             accessKey={accessKey ?? null}
             settings={settings ?? null}
             onUpdateSettings={onUpdateSettings ?? (() => {})}
+            initialTab={initialTab}
           />
         ) : app.id === 'settings' ? (
           <Settings />
+        ) : app.id === 'chat' ? (
+          <ChatApp accessKey={accessKey} />
         ) : app.id === 'file-editor' && filePath && fileName ? (
           <TextEditor
             filePath={filePath}
@@ -256,7 +264,7 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
         ) : (
           <div className="window-placeholder">
             <svg width="48" height="48" viewBox="0 0 64 64" fill="none">
-              <rect x="8" y="10" width="48" height="40" rx="4" stroke="#c8c8d4" strokeWidth="1.5" fill="none" opacity="0.3" />
+              <rect x="8" y="10" width="48" height="40" rx="4" stroke="currentColor" strokeWidth="1.5" fill="none" opacity="0.3" />
             </svg>
             <span>{app.title} - 内容区域</span>
           </div>
