@@ -8,10 +8,10 @@ interface ChatViewProps {
   currentUserKey: string; allProfiles: UserProfile[]; myProfile: UserProfile;
   onSendMessage: (convId: string, content: string, msgType: string, fileName?: string, fileSize?: number) => void;
   onAddMembers: (convId: string, memberKeys: string[]) => void;
-  onUploadFile: (convId: string, localPath: string) => Promise<string | null>;
+  onUploadFile: (convId: string, file: File) => Promise<string | null>;
   onSendCloudFile: (convId: string, vfsPath: string, fileName: string) => Promise<string | null>;
   onCaptureScreenshot: () => Promise<string | null>;
-  onDownloadFile: (s3Key: string, localPath: string) => void;
+  onDownloadFile: (s3Key: string, filename: string) => void;
 }
 
 const ChatView: FC<ChatViewProps> = ({
@@ -25,6 +25,7 @@ const ChatView: FC<ChatViewProps> = ({
   const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const conv = conversations.find(c => c.id === convId);
   const isGroup = conv?.type === 'group';
@@ -37,15 +38,17 @@ const ChatView: FC<ChatViewProps> = ({
   const handleKeyDown = (e: React.KeyboardEvent) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } };
   const handleEmoji = (emoji: string) => { setInput(p => p + emoji); setShowEmoji(false); textareaRef.current?.focus(); };
 
-  const handleFile = async () => {
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const p = await open({ multiple: false }) as string | null;
-      if (!p) return;
-      const fn = p.split(/[\\/]/).pop() || 'file';
-      const s3k = await onUploadFile(convId, p);
-      if (s3k) onSendMessage(convId, s3k, 'file', fn, 0);
-    } catch {}
+  const handleFile = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const s3k = await onUploadFile(convId, file);
+    if (s3k) onSendMessage(convId, s3k, 'file', file.name, file.size);
+    // Reset input so the same file can be re-selected
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const handleCloudFile = () => {
@@ -63,6 +66,7 @@ const ChatView: FC<ChatViewProps> = ({
 
   return (
     <div className="chat-view">
+      <input type="file" ref={fileInputRef} style={{ display: 'none' }} onChange={handleFileChange} />
       <div className="chat-header">
         <div className="chat-header-info">
           <div className="chat-avatar chat-avatar-sm">{convName.charAt(0).toUpperCase()}</div>
@@ -97,7 +101,7 @@ const ChatView: FC<ChatViewProps> = ({
                   <div className="message-file">
                     <svg viewBox="0 0 16 16" width="14" height="14" fill="none"><path d="M4 1h5l3 3v10a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1z" fill="#6b7280" stroke="#4b5563" strokeWidth="0.8"/><path d="M9 1v3h3" fill="none" stroke="#4b5563" strokeWidth="0.8"/></svg>
                     <span>{msg.fileName || '文件'}</span>
-                    <button className="message-file-dl" onClick={async () => { const { save } = await import('@tauri-apps/plugin-dialog'); const p = await save({ defaultPath: msg.fileName || 'file' }); if (p) onDownloadFile(msg.content, p); }}>下载</button>
+                    <button className="message-file-dl" onClick={() => onDownloadFile(msg.content, msg.fileName || 'file')}>下载</button>
                   </div>
                  ) : msg.type === 'emoji' ? <span style={{ fontSize: '2rem' }}>{msg.content}</span>
                  : <div className="message-text">{msg.content}</div>}
