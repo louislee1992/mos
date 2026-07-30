@@ -138,7 +138,7 @@ public class ChatController {
     @GetMapping("/conversations/{id}/messages")
     public ResponseEntity<?> loadMessages(@PathVariable String id, HttpServletRequest req) {
         try {
-            return ResponseEntity.ok(chatService.loadMessages(getClient(req), getBucket(req), id));
+            return ResponseEntity.ok(chatService.loadMessages(getClient(req), getBucket(req), id, getAccessKey(req)));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
         }
@@ -154,10 +154,11 @@ public class ChatController {
             ChatMessage msg = chatService.sendMessage(client, bucket, id, sender,
                     body.get("content"), body.getOrDefault("msgType", "text"),
                     body.get("fileName"),
-                    body.containsKey("fileSize") ? Long.parseLong(body.get("fileSize")) : null);
+                    body.containsKey("fileSize") ? Long.parseLong(body.get("fileSize")) : null,
+                    getAccessKey(req));
 
             // Push via WebSocket to conversation members
-            String membersKey = "mos-chat/conversations/" + id + "_members.json";
+            String membersKey = ChatService.PREFIX + "/conversations/" + id + "_members.json";
             try {
                 ConversationMeta meta = minioService.readJson(client, bucket, membersKey, ConversationMeta.class);
                 if (meta != null && meta.getMembers() != null) {

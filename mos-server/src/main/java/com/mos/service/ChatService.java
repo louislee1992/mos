@@ -23,7 +23,7 @@ import java.util.UUID;
 public class ChatService {
 
     private final MinioService minioService;
-    private static final String PREFIX = "mos-chat";
+    public static final String PREFIX = "mos-chat";
 
     // ── Profiles ──
 
@@ -50,12 +50,21 @@ public class ChatService {
 
     public void saveMyProfile(MinioClient client, String bucket, String accessKey,
                               String nickname, String avatar) throws Exception {
+        String key = PREFIX + "/profiles/" + accessKey + ".json";
+        long createdAt = System.currentTimeMillis();
+        try {
+            UserProfile existing = minioService.readJson(client, bucket, key, UserProfile.class);
+            if (existing != null && existing.getCreatedAt() > 0) {
+                createdAt = existing.getCreatedAt();
+            }
+        } catch (Exception ignored) {
+        }
         UserProfile profile = new UserProfile();
         profile.setAccessKey(accessKey);
         profile.setNickname(nickname != null ? nickname : accessKey);
         profile.setAvatar(avatar != null ? avatar : "");
-        profile.setCreatedAt(System.currentTimeMillis());
-        minioService.writeJson(client, bucket, PREFIX + "/profiles/" + accessKey + ".json", profile);
+        profile.setCreatedAt(createdAt);
+        minioService.writeJson(client, bucket, key, profile);
     }
 
     // ── Conversations ──
@@ -134,7 +143,13 @@ public class ChatService {
 
     // ── Messages ──
 
-    public List<ChatMessage> loadMessages(MinioClient client, String bucket, String convId) throws Exception {
+    public List<ChatMessage> loadMessages(MinioClient client, String bucket, String convId,
+                                          String currentUser) throws Exception {
+        String membersKey = PREFIX + "/conversations/" + convId + "_members.json";
+        ConversationMeta meta = minioService.readJson(client, bucket, membersKey, ConversationMeta.class);
+        if (meta == null || meta.getMembers() == null || !meta.getMembers().contains(currentUser)) {
+            throw new SecurityException("User is not a member of this conversation");
+        }
         String key = PREFIX + "/conversations/" + convId + ".json";
         return minioService.readJsonOrDefault(client, bucket, key,
                 new TypeReference<List<ChatMessage>>() {
@@ -143,7 +158,15 @@ public class ChatService {
 
     public ChatMessage sendMessage(MinioClient client, String bucket, String convId,
                                     String sender, String content, String msgType,
-                                    String fileName, Long fileSize) throws Exception {
+                                    String fileName, Long fileSize,
+                                    String currentUser) throws Exception {
+        // Verify sender is a member of the conversation
+        String membersKey = PREFIX + "/conversations/" + convId + "_members.json";
+        ConversationMeta meta = minioService.readJson(client, bucket, membersKey, ConversationMeta.class);
+        if (meta == null || meta.getMembers() == null || !meta.getMembers().contains(currentUser)) {
+            throw new SecurityException("User is not a member of this conversation");
+        }
+
         String senderName = loadMyProfile(client, bucket, sender).getNickname();
         ChatMessage msg = new ChatMessage();
         msg.setId(UUID.randomUUID().toString());
@@ -158,14 +181,12 @@ public class ChatService {
 
         // Append to messages array
         String msgKey = PREFIX + "/conversations/" + convId + ".json";
-        List<ChatMessage> existing = loadMessages(client, bucket, convId);
+        List<ChatMessage> existing = loadMessages(client, bucket, convId, currentUser);
         existing.add(msg);
         minioService.writeJson(client, bucket, msgKey, existing);
 
         // Update conversation meta
-        String membersKey = PREFIX + "/conversations/" + convId + "_members.json";
         try {
-            ConversationMeta meta = minioService.readJson(client, bucket, membersKey, ConversationMeta.class);
             meta.setLastMessage(computeLastMessagePreview(msgType, content, fileName));
             meta.setLastMessageTime(msg.getTimestamp());
             minioService.writeJson(client, bucket, membersKey, meta);
