@@ -1,8 +1,21 @@
 import { type FC, useState, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { verifyCredentials } from '../api/auth';
+import { setCredentials } from '../api/client';
+
+interface AccountEntry {
+  id: string;
+  name: string;
+  endpoint: string;
+  accessKey: string;
+  secretKey: string;
+  isAdmin: boolean;
+  createdAt: number;
+  lastUsedAt: number;
+}
 
 interface LoginScreenProps {
-  onLoginSuccess: () => void;
+  onLoginSuccess: (accessKey: string) => void;
 }
 
 function getTimeString(): string {
@@ -18,6 +31,30 @@ function getDateString(): string {
   return `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${weekdays[now.getDay()]}`;
 }
 
+function getAccountColor(id: string): string {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = id.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const hue = ((hash % 360) + 360) % 360;
+  return `hsl(${hue}, 55%, 45%)`;
+}
+
+const ACCOUNTS_KEY = 'mos-accounts';
+
+function loadAccounts(): AccountEntry[] {
+  try {
+    const raw = localStorage.getItem(ACCOUNTS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveAccounts(entries: AccountEntry[]) {
+  localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(entries));
+}
+
 const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [showForm, setShowForm] = useState(false);
   const [timeStr, setTimeStr] = useState(getTimeString);
@@ -28,6 +65,21 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [showSecret, setShowSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [accounts, setAccounts] = useState<AccountEntry[]>(loadAccounts);
+  const [endpointFocused, setEndpointFocused] = useState(false);
+  const [endpointSuggestions, setEndpointSuggestions] = useState<string[]>([]);
+
+  const uniqueEndpoints = [...new Set(accounts.map((a) => a.endpoint))];
+
+  const filterEndpointSuggestions = (input: string) => {
+    if (!input.trim()) {
+      setEndpointSuggestions(uniqueEndpoints);
+    } else {
+      setEndpointSuggestions(
+        uniqueEndpoints.filter((ep) => ep.toLowerCase().includes(input.toLowerCase())),
+      );
+    }
+  };
 
   useEffect(() => {
     const timer = setInterval(() => setTimeStr(getTimeString()), 1000);
@@ -49,31 +101,69 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [showForm]);
 
+  const doLogin = useCallback(async (ep: string, ak: string, sk: string) => {
+    setError(null);
+    setLoading(true);
+    try {
+      await verifyCredentials(ep, ak, sk);
+      setCredentials(ep, ak, sk);
+
+      const now = Date.now();
+      const existing = accounts.find(
+        (a) => a.endpoint === ep && a.accessKey === ak,
+      );
+      let host = ep;
+      try {
+        host = new URL(ep).host;
+      } catch {
+        /* keep raw */
+      }
+      const entry: AccountEntry = {
+        id: existing?.id ?? crypto.randomUUID(),
+        name: `MinIO @ ${host}`,
+        endpoint: ep,
+        accessKey: ak,
+        secretKey: sk,
+        isAdmin: existing?.isAdmin ?? false,
+        createdAt: existing?.createdAt ?? now,
+        lastUsedAt: now,
+      };
+      const updated = accounts.filter(
+        (a) => !(a.endpoint === ep && a.accessKey === ak),
+      );
+      updated.push(entry);
+      saveAccounts(updated);
+      setAccounts(updated);
+      onLoginSuccess(ak);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '连接失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [accounts, onLoginSuccess]);
+
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      console.log('[LoginScreen] handleSubmit, endpoint:', endpoint.trim());
-      setError(null);
-      setLoading(true);
-      try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        console.log('[LoginScreen] invoking verify_credentials');
-        const result = await invoke('verify_credentials', {
-          endpoint: endpoint.trim(),
-          accessKey: accessKey.trim(),
-          secretKey: secretKey.trim(),
-        });
-        console.log('[LoginScreen] verify_credentials success:', result);
-        onLoginSuccess();
-      } catch (err) {
-        console.error('[LoginScreen] verify_credentials failed:', err);
-        setError(typeof err === 'string' ? err : '连接失败，请检查凭证和地址');
-      } finally {
-        setLoading(false);
-      }
+      await doLogin(endpoint.trim(), accessKey.trim(), secretKey.trim());
     },
-    [endpoint, accessKey, secretKey, onLoginSuccess],
+    [endpoint, accessKey, secretKey, doLogin],
   );
+
+  const handleDeleteAccount = useCallback((id: string) => {
+    const updated = accounts.filter((a) => a.id !== id);
+    saveAccounts(updated);
+    setAccounts(updated);
+  }, [accounts]);
+
+  const handleSelectAccount = useCallback((acc: AccountEntry) => {
+    setEndpoint(acc.endpoint);
+    setAccessKey(acc.accessKey);
+    setSecretKey(acc.secretKey);
+    setError(null);
+  }, []);
+
+  const sortedAccounts = [...accounts].sort((a, b) => b.lastUsedAt - a.lastUsedAt);
 
   return (
     <div
@@ -131,16 +221,89 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                 <h2 className="text-xl font-semibold text-white">mos</h2>
               </div>
 
+              {/* 已保存账户 */}
+              {sortedAccounts.length > 0 && (
+                <div className="flex items-center gap-2 flex-wrap justify-center">
+                  {sortedAccounts.map((acc) => (
+                    <div key={acc.id} className="relative group">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectAccount(acc)}
+                        className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium text-white
+                                   border-2 border-white/20 hover:border-white/40 transition-colors cursor-pointer"
+                        style={{ backgroundColor: getAccountColor(acc.id) }}
+                        title={acc.name}
+                      >
+                        {acc.name.charAt(0).toUpperCase()}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDeleteAccount(acc.id);
+                        }}
+                        className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500/80 text-white
+                                   flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100
+                                   transition-opacity cursor-pointer hover:bg-red-500"
+                      >
+                        &#x00D7;
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               {/* 表单 */}
               <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
-                <input
-                  type="text"
-                  value={endpoint}
-                  onChange={(e) => setEndpoint(e.target.value)}
-                  placeholder="http://127.0.0.1:9000"
-                  className="w-full px-3 py-2.5 rounded-md text-sm text-white outline-none bg-white/8
-                             border border-white/10 focus:border-blue-400/60 focus:bg-white/12 transition-colors"
-                />
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={endpoint}
+                    onChange={(e) => {
+                      setEndpoint(e.target.value);
+                      filterEndpointSuggestions(e.target.value);
+                    }}
+                    onFocus={() => {
+                      setEndpointFocused(true);
+                      filterEndpointSuggestions(endpoint);
+                    }}
+                    onBlur={() => {
+                      // Delay hiding so click on suggestion registers
+                      setTimeout(() => setEndpointFocused(false), 150);
+                    }}
+                    placeholder="http://127.0.0.1:9000"
+                    className="w-full px-3 py-2.5 rounded-md text-sm text-white outline-none bg-white/8
+                               border border-white/10 focus:border-blue-400/60 focus:bg-white/12 transition-colors"
+                  />
+                  {/* endpoint 自动补全建议 */}
+                  {endpointFocused && endpointSuggestions.length > 0 && (
+                    <div
+                      className="absolute z-10 top-full left-0 right-0 mt-1 rounded-md overflow-hidden"
+                      style={{
+                        background: 'rgba(30,30,55,0.95)',
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        backdropFilter: 'blur(12px)',
+                      }}
+                    >
+                      {endpointSuggestions.map((ep) => (
+                        <button
+                          key={ep}
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            setEndpoint(ep);
+                            setEndpointFocused(false);
+                          }}
+                          className="w-full text-left px-3 py-2 text-sm text-white/80 hover:bg-white/10
+                                     transition-colors cursor-pointer"
+                        >
+                          {ep}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 <input
                   type="text"
                   value={accessKey}
