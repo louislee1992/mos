@@ -29,8 +29,6 @@ public class WebMvcConfig implements WebMvcConfigurer {
 
     @Override
     public void addViewControllers(org.springframework.web.servlet.config.annotation.ViewControllerRegistry registry) {
-        // SPA fallback: all non-API, non-WebSocket paths → index.html
-        registry.addViewController("/{spring:[^(api|ws)].*}")
-                .setViewName("forward:/index.html");
+        registry.addViewController("/").setViewName("forward:/index.html");
     }
 }
