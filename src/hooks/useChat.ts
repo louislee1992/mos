@@ -1,10 +1,24 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { ChatMessage, ConversationMeta, UserProfile, RedisConfig, RedisStatus } from '../types/chat';
+import { useWebSocket } from './useWebSocket';
+import { getCredentials } from '../api/client';
+import {
+  listProfiles,
+  myProfile as myProfileApi,
+  updateMyProfile as updateMyProfileApi,
+  getOnlineUsers,
+  listConversations,
+  getOrCreateConversation,
+  loadMessages,
+  sendMessage as sendMessageApi,
+  createGroup as createGroupApi,
+  addGroupMembers,
+  uploadChatFile,
+  sendCloudFile as sendCloudFileApi,
+} from '../api/chat';
+import type { ChatMessage, ConversationMeta, UserProfile } from '../types/chat';
 
 export function useChat(accessKey: string | null | undefined) {
-  const [redisStatus, setRedisStatus] = useState<RedisStatus>({ connected: false, host: '', port: 0 });
+  const [wsConnected, setWsConnected] = useState(false);
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -15,138 +29,385 @@ export function useChat(accessKey: string | null | undefined) {
   });
   const [toast, setToast] = useState<string | null>(null);
   const [loadingMsg, setLoadingMsg] = useState(false);
-  const unlistenRef = useRef<UnlistenFn | null>(null);
-  const hbRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const showToast = useCallback((msg: string) => { setToast(msg); setTimeout(() => setToast(null), 3000); }, []);
+  // Refs for latest values used in WebSocket callbacks (avoid stale closures)
+  const accessKeyRef = useRef(accessKey);
+  const activeConvIdRef = useRef(activeConvId);
+  useEffect(() => { accessKeyRef.current = accessKey; }, [accessKey]);
+  useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
+
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Data refreshers (REST API)
+  // ---------------------------------------------------------------------------
 
   const refreshOnlineUsers = useCallback(async () => {
-    try { setOnlineUsers(await invoke<UserProfile[]>('get_online_users')); } catch {}
+    try {
+      setOnlineUsers(await getOnlineUsers());
+    } catch {
+      // ignore
+    }
   }, []);
 
   const refreshProfiles = useCallback(async () => {
-    try { setAllProfiles(await invoke<UserProfile[]>('list_chat_profiles')); } catch {}
+    try {
+      setAllProfiles(await listProfiles());
+    } catch {
+      // ignore
+    }
   }, []);
 
   const refreshConversations = useCallback(async () => {
-    try { setConversations(await invoke<ConversationMeta[]>('get_conversations')); } catch {}
+    try {
+      setConversations(await listConversations());
+    } catch {
+      // ignore
+    }
   }, []);
 
   const loadMyProfile = useCallback(async () => {
     if (!accessKey) return;
-    try { setMyProfile(await invoke<UserProfile>('get_user_profile', { accessKey })); } catch {}
+    try {
+      setMyProfile(await myProfileApi());
+    } catch {
+      // ignore
+    }
   }, [accessKey]);
 
-  const connectRedis = useCallback(async (config: RedisConfig) => {
+  // ---------------------------------------------------------------------------
+  // WebSocket message handler
+  // ---------------------------------------------------------------------------
+
+  const handleChatMessage = useCallback((msg: unknown) => {
     try {
-      await invoke('connect_redis', { config });
-      const unlisten = await listen<string>('chat-message', (event) => {
-        try {
-          const msg: ChatMessage = JSON.parse(event.payload);
-          setConversations(prev => {
-            const exists = prev.find(c => c.id === msg.convId);
-            if (!exists) return prev;
-            return prev.map(c => c.id === msg.convId ? {
-              ...c,
-              lastMessage: msg.type === 'text' || msg.type === 'emoji' ? msg.content
-                : msg.type === 'image' ? '[图片]' : msg.type === 'file' ? `[文件] ${msg.fileName || ''}` : msg.content,
-              lastMessageTime: msg.timestamp,
-            } : c).sort((a, b) => b.lastMessageTime - a.lastMessageTime);
-          });
-          setMessages(prev => {
-            if ((msg.convId === activeConvId || msg.sender === accessKey) && !prev.find(m => m.id === msg.id))
-              return [...prev, msg];
-            return prev;
-          });
-        } catch {}
+      const chatMsg = msg as ChatMessage;
+      setConversations(prev => {
+        const exists = prev.find(c => c.id === chatMsg.convId);
+        if (!exists) return prev;
+        return prev
+          .map(c =>
+            c.id === chatMsg.convId
+              ? {
+                  ...c,
+                  lastMessage:
+                    chatMsg.type === 'text' || chatMsg.type === 'emoji'
+                      ? chatMsg.content
+                      : chatMsg.type === 'image'
+                        ? '[图片]'
+                        : chatMsg.type === 'file'
+                          ? `[文件] ${chatMsg.fileName || ''}`
+                          : chatMsg.content,
+                  lastMessageTime: chatMsg.timestamp,
+                }
+              : c,
+          )
+          .sort((a, b) => b.lastMessageTime - a.lastMessageTime);
       });
-      unlistenRef.current = unlisten;
-      hbRef.current = setInterval(() => { invoke('heartbeat').catch(() => {}); }, 25000);
-      setRedisStatus({ connected: true, host: config.host, port: config.port });
-      await refreshOnlineUsers(); await refreshProfiles(); await refreshConversations(); await loadMyProfile();
-    } catch (e) { showToast(`连接失败: ${e}`); }
-  }, [accessKey, activeConvId, showToast, refreshOnlineUsers, refreshProfiles, refreshConversations, loadMyProfile]);
-
-  const disconnectRedis = useCallback(async () => {
-    try { await invoke('disconnect_redis'); } catch {}
-    unlistenRef.current?.(); unlistenRef.current = null;
-    if (hbRef.current) { clearInterval(hbRef.current); hbRef.current = null; }
-    setRedisStatus({ connected: false, host: '', port: 0 });
+      setMessages(prev => {
+        if (
+          (chatMsg.convId === activeConvIdRef.current ||
+            chatMsg.sender === accessKeyRef.current) &&
+          !prev.find(m => m.id === chatMsg.id)
+        ) {
+          return [...prev, chatMsg];
+        }
+        return prev;
+      });
+    } catch {
+      // ignore
+    }
   }, []);
 
-  const updateMyProfile = useCallback(async (nickname: string, avatar?: string) => {
-    try {
-      await invoke('update_user_profile', { nickname, avatar: avatar || null });
-      setMyProfile(prev => ({ ...prev, nickname, avatar }));
-      showToast('Profile 已更新');
-    } catch (e) { showToast(`更新失败: ${e}`); }
-  }, [showToast]);
+  const handleOnlineUpdate = useCallback(() => {
+    refreshOnlineUsers();
+  }, [refreshOnlineUsers]);
 
-  const openConversation = useCallback(async (otherUser: string) => {
-    try {
-      const meta = await invoke<ConversationMeta>('get_or_create_private_conv', { otherUser });
-      setActiveConvId(meta.id); setLoadingMsg(true);
-      setMessages(await invoke<ChatMessage[]>('load_conversation', { convId: meta.id }));
+  const handleWsConnected = useCallback(() => {
+    setWsConnected(true);
+    refreshOnlineUsers();
+    refreshProfiles();
+    refreshConversations();
+    loadMyProfile();
+  }, [refreshOnlineUsers, refreshProfiles, refreshConversations, loadMyProfile]);
+
+  const ws = useWebSocket(
+    accessKey,
+    handleChatMessage,
+    handleOnlineUpdate,
+    handleWsConnected,
+  );
+
+  // ---------------------------------------------------------------------------
+  // Connection lifecycle
+  // ---------------------------------------------------------------------------
+
+  const wsConnect = useCallback(() => {
+    ws.connect();
+  }, [ws]);
+
+  const wsDisconnect = useCallback(() => {
+    ws.disconnect();
+    setWsConnected(false);
+    setConversations([]);
+    setMessages([]);
+    setOnlineUsers([]);
+    setAllProfiles([]);
+  }, [ws]);
+
+  // ---------------------------------------------------------------------------
+  // Profile
+  // ---------------------------------------------------------------------------
+
+  const updateMyProfile = useCallback(
+    async (nickname: string, avatar?: string) => {
+      try {
+        await updateMyProfileApi(nickname, avatar);
+        setMyProfile(prev => ({ ...prev, nickname, avatar }));
+        showToast('Profile 已更新');
+      } catch (e) {
+        showToast(`更新失败: ${e}`);
+      }
+    },
+    [showToast],
+  );
+
+  // ---------------------------------------------------------------------------
+  // Conversations
+  // ---------------------------------------------------------------------------
+
+  const openConversation = useCallback(
+    async (otherUser: string) => {
+      try {
+        const meta = await getOrCreateConversation(otherUser);
+        setActiveConvId(meta.id);
+        setLoadingMsg(true);
+        setMessages(await loadMessages(meta.id));
+        setLoadingMsg(false);
+        setConversations(prev =>
+          prev.find(c => c.id === meta.id) ? prev : [meta, ...prev],
+        );
+      } catch (e) {
+        showToast(`打开会话失败: ${e}`);
+      }
+    },
+    [showToast],
+  );
+
+  const openConversationById = useCallback(
+    async (convId: string) => {
+      setActiveConvId(convId);
+      setLoadingMsg(true);
+      try {
+        setMessages(await loadMessages(convId));
+      } catch {
+        setMessages([]);
+      }
       setLoadingMsg(false);
-      setConversations(prev => prev.find(c => c.id === meta.id) ? prev : [meta, ...prev]);
-    } catch (e) { showToast(`打开会话失败: ${e}`); }
-  }, [showToast]);
+    },
+    [],
+  );
 
-  const openConversationById = useCallback(async (convId: string) => {
-    setActiveConvId(convId); setLoadingMsg(true);
-    try { setMessages(await invoke<ChatMessage[]>('load_conversation', { convId })); } catch { setMessages([]); }
-    setLoadingMsg(false);
-  }, []);
+  // ---------------------------------------------------------------------------
+  // Send message
+  // ---------------------------------------------------------------------------
 
-  const sendMessage = useCallback(async (convId: string, content: string, msgType = 'text', fileName?: string, fileSize?: number) => {
-    try {
-      const msg = await invoke<ChatMessage>('send_message', { convId, content, msgType, fileName: fileName || null, fileSize: fileSize || null });
-      setMessages(prev => [...prev, msg]);
-    } catch (e) { showToast(`发送失败: ${e}`); }
-  }, [showToast]);
+  const sendMessage = useCallback(
+    async (
+      convId: string,
+      content: string,
+      msgType = 'text',
+      fileName?: string,
+      fileSize?: number,
+    ) => {
+      try {
+        const msg = await sendMessageApi(convId, content, msgType, fileName, fileSize);
+        setMessages(prev => [...prev, msg]);
+      } catch (e) {
+        showToast(`发送失败: ${e}`);
+      }
+    },
+    [showToast],
+  );
 
-  const createGroup = useCallback(async (name: string, memberKeys: string[]) => {
-    try {
-      const meta = await invoke<ConversationMeta>('create_group', { name, memberKeys });
-      setConversations(prev => [meta, ...prev]);
-      showToast(`群聊 "${name}" 已创建`);
-    } catch (e) { showToast(`创建失败: ${e}`); }
-  }, [showToast]);
+  // ---------------------------------------------------------------------------
+  // Group management
+  // ---------------------------------------------------------------------------
 
-  const addMembers = useCallback(async (convId: string, memberKeys: string[]) => {
-    try { await invoke('add_group_members', { convId, memberKeys }); showToast('成员已添加'); }
-    catch (e) { showToast(`添加失败: ${e}`); }
-  }, [showToast]);
+  const createGroup = useCallback(
+    async (name: string, memberKeys: string[]) => {
+      try {
+        const meta = await createGroupApi(name, memberKeys);
+        setConversations(prev => [meta, ...prev]);
+        showToast(`群聊 "${name}" 已创建`);
+      } catch (e) {
+        showToast(`创建失败: ${e}`);
+      }
+    },
+    [showToast],
+  );
 
-  const uploadFile = useCallback(async (convId: string, localPath: string) => {
-    try { return await invoke<string>('upload_chat_file', { convId, localPath }); }
-    catch (e) { showToast(`上传失败: ${e}`); return null; }
-  }, [showToast]);
+  const addMembers = useCallback(
+    async (convId: string, memberKeys: string[]) => {
+      try {
+        await addGroupMembers(convId, memberKeys);
+        showToast('成员已添加');
+      } catch (e) {
+        showToast(`添加失败: ${e}`);
+      }
+    },
+    [showToast],
+  );
 
-  const sendCloudFile = useCallback(async (convId: string, vfsPath: string, fileName: string) => {
-    try { return await invoke<string>('send_cloud_file', { convId, vfsPath, fileName }); }
-    catch (e) { showToast(`发送失败: ${e}`); return null; }
-  }, [showToast]);
+  // ---------------------------------------------------------------------------
+  // File operations
+  // ---------------------------------------------------------------------------
+
+  const uploadFile = useCallback(
+    async (convId: string, file: File) => {
+      try {
+        const result = await uploadChatFile(file, convId);
+        return result.s3Key;
+      } catch (e) {
+        showToast(`上传失败: ${e}`);
+        return null;
+      }
+    },
+    [showToast],
+  );
+
+  const sendCloudFile = useCallback(
+    async (convId: string, vfsPath: string, fileName: string) => {
+      try {
+        const result = await sendCloudFileApi(convId, vfsPath, fileName);
+        return result?.s3Key ?? null;
+      } catch (e) {
+        showToast(`发送失败: ${e}`);
+        return null;
+      }
+    },
+    [showToast],
+  );
+
+  // ---------------------------------------------------------------------------
+  // Screenshot (browser API)
+  // ---------------------------------------------------------------------------
 
   const captureScreenshot = useCallback(async () => {
-    try { return await invoke<string>('capture_screenshot'); }
-    catch (e) { showToast(`截图失败: ${e}`); return null; }
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+      });
+      const video = document.createElement('video');
+      video.srcObject = stream;
+      await video.play();
+
+      // Wait one frame so the video element has real data
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(video, 0, 0);
+
+      // Stop all tracks to release the screen capture
+      stream.getTracks().forEach(t => t.stop());
+
+      // Return as base64 data URL
+      return await new Promise<string | null>(resolve => {
+        canvas.toBlob(blob => {
+          if (!blob) {
+            resolve(null);
+            return;
+          }
+          const reader = new FileReader();
+          reader.onloadend = () => resolve(reader.result as string);
+          reader.readAsDataURL(blob);
+        }, 'image/png');
+      });
+    } catch (e) {
+      showToast(`截图失败: ${e}`);
+      return null;
+    }
   }, [showToast]);
 
-  const downloadFile = useCallback(async (s3Key: string, localPath: string) => {
-    try { await invoke('download_chat_file', { s3Key, localPath }); showToast('文件已下载'); }
-    catch (e) { showToast(`下载失败: ${e}`); }
-  }, [showToast]);
+  // ---------------------------------------------------------------------------
+  // File download (browser Blob)
+  // ---------------------------------------------------------------------------
 
-  useEffect(() => () => { unlistenRef.current?.(); if (hbRef.current) clearInterval(hbRef.current); }, []);
+  const downloadFile = useCallback(
+    async (s3Key: string, filename: string) => {
+      try {
+        const creds = getCredentials();
+        const res = await fetch(
+          `${creds.endpoint}/api/chat/download?s3Key=${encodeURIComponent(s3Key)}`,
+          {
+            headers: {
+              Authorization:
+                'Basic ' + btoa(`${creds.accessKey}:${creds.secretKey}`),
+              'X-Minio-Endpoint': creds.endpoint,
+            },
+          },
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('文件已下载');
+      } catch (e) {
+        showToast(`下载失败: ${e}`);
+      }
+    },
+    [showToast],
+  );
+
+  // ---------------------------------------------------------------------------
+  // Cleanup on unmount
+  // ---------------------------------------------------------------------------
+
+  useEffect(() => {
+    return () => {
+      ws.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Return (redisStatus -> wsConnected, connect/disconnect replaced)
+  // ---------------------------------------------------------------------------
 
   return {
-    redisStatus, connectRedis, disconnectRedis,
-    conversations, activeConvId, openConversation, openConversationById,
-    messages, loadingMsg, sendMessage,
-    onlineUsers, allProfiles, myProfile, updateMyProfile,
-    createGroup, addMembers, refreshConversations, refreshProfiles,
-    uploadFile, sendCloudFile, captureScreenshot, downloadFile,
-    toast, showToast,
+    wsConnected,
+    wsConnect,
+    wsDisconnect,
+    conversations,
+    activeConvId,
+    openConversation,
+    openConversationById,
+    messages,
+    loadingMsg,
+    sendMessage,
+    onlineUsers,
+    allProfiles,
+    myProfile,
+    updateMyProfile,
+    createGroup,
+    addMembers,
+    refreshConversations,
+    refreshProfiles,
+    uploadFile,
+    sendCloudFile,
+    captureScreenshot,
+    downloadFile,
+    toast,
+    showToast,
   };
 }
