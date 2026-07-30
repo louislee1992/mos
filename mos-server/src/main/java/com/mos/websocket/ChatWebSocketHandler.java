@@ -8,7 +8,9 @@ import com.mos.service.MinioService;
 import com.mos.service.OnlineUserService;
 import io.minio.MinioClient;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
+import org.springframework.messaging.handler.annotation.MessageExceptionHandler;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
@@ -24,6 +26,7 @@ import java.util.Map;
 
 @Controller
 @RequiredArgsConstructor
+@Slf4j
 public class ChatWebSocketHandler {
 
     private final OnlineUserService onlineUserService;
@@ -42,6 +45,10 @@ public class ChatWebSocketHandler {
             String decoded = new String(Base64.getDecoder().decode(
                     auth.substring(6)), StandardCharsets.UTF_8);
             String[] parts = decoded.split(":", 2);
+            if (parts.length < 2) {
+                log.warn("Invalid Basic Auth format for session {}", accessor.getSessionId());
+                return;
+            }
             String accessKey = parts[0];
             String bucket = MinioConfig.deriveBucketName(accessKey);
 
@@ -61,7 +68,8 @@ public class ChatWebSocketHandler {
             // Broadcast online update
             messagingTemplate.convertAndSend("/topic/online",
                     Map.of("type", "user_online", "accessKey", accessKey));
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            log.error("Failed to handle STOMP connect for session {}: {}", accessor.getSessionId(), e.getMessage(), e);
         }
     }
 
@@ -87,6 +95,10 @@ public class ChatWebSocketHandler {
 
         String convId = (String) payload.get("convId");
         String content = (String) payload.get("content");
+        if (convId == null || content == null) {
+            log.warn("Received chat.send with null convId or content from user {}", accessKey);
+            return;
+        }
         String msgType = (String) payload.getOrDefault("msgType", "text");
         String fileName = (String) payload.get("fileName");
         Long fileSize = payload.get("fileSize") != null
@@ -106,9 +118,16 @@ public class ChatWebSocketHandler {
                         messagingTemplate.convertAndSendToUser(member, "/queue/chat", msg);
                     }
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                log.error("Failed to read conversation members for convId {}: {}", convId, e.getMessage(), e);
             }
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            log.error("Failed to send chat message from user {}: {}", accessKey, e.getMessage(), e);
         }
+    }
+
+    @MessageExceptionHandler
+    public void handleMessageException(Exception e) {
+        log.error("Unhandled exception in chat WebSocket handler: {}", e.getMessage(), e);
     }
 }
