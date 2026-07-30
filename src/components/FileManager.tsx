@@ -1,4 +1,7 @@
 import React, { type FC, useState, useEffect, useCallback, useRef } from 'react';
+import { listVfs, createFolder, createFile, moveToTrash, uploadFile } from '../api/vfs';
+import { downloadVfsFile } from '../api/client';
+import type { VfsEntry } from '../types/vfs';
 
 interface DirNode {
   name: string;
@@ -212,6 +215,62 @@ interface CtxMenu {
   visible: boolean;
 }
 
+// ── tree builder ──
+
+function entriesToTree(entries: VfsEntry[]): DirNode[] {
+  const nodeMap = new Map<string, DirNode>();
+
+  // Build complete path hierarchy
+  for (const entry of entries) {
+    const parts = entry.path.split('/');
+
+    // Ensure all intermediate folder paths exist
+    let currentPath = '';
+    for (let i = 0; i < parts.length; i++) {
+      currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
+      if (!nodeMap.has(currentPath)) {
+        nodeMap.set(currentPath, {
+          name: parts[i],
+          isDirectory: true,
+          size: 0,
+          modifiedAt: '',
+          children: [],
+        });
+      }
+    }
+  }
+
+  // Populate file entries and update folder metadata
+  for (const entry of entries) {
+    const node = nodeMap.get(entry.path);
+    if (node) {
+      node.isDirectory = entry.type === 'folder';
+      node.size = entry.size;
+      node.modifiedAt = entry.lastModified;
+      node.children = node.children || [];
+    }
+  }
+
+  // Build tree: add each node to its parent
+  const root: DirNode[] = [];
+  for (const [path, node] of nodeMap) {
+    const lastSlash = path.lastIndexOf('/');
+    if (lastSlash === -1) {
+      root.push(node);
+    } else {
+      const parentPath = path.substring(0, lastSlash);
+      const parent = nodeMap.get(parentPath);
+      if (parent) {
+        parent.children.push(node);
+      } else {
+        root.push(node);
+      }
+    }
+  }
+
+  return root;
+}
+
 // ── FileManager ──
 
 const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (filePath: string, fileName: string) => void }> = ({ onOpenApp, onOpenFile }) => {
@@ -328,10 +387,9 @@ const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (fileP
 
   const loadVfs = useCallback(async () => {
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('ensure_vfs');
-      const entries = await invoke<DirNode[]>('list_vfs');
-      setVfsTree([{ name: '我的文件', isDirectory: true, size: 0, modifiedAt: '', children: entries }]);
+      const entries = await listVfs();
+      const tree = entriesToTree(entries);
+      setVfsTree([{ name: '我的文件', isDirectory: true, size: 0, modifiedAt: '', children: tree }]);
     } catch (e) {
       console.warn('[FileManager] loadVfs failed:', e);
     }
@@ -407,12 +465,11 @@ const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (fileP
     if (!name) { setModalError('请输入名称'); return; }
     if (name.includes('/')) { setModalError('名称不能包含 /'); return; }
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
       const targetPath = vfsPath(name);
       if (createType === 'folder') {
-        await invoke('create_vfs_folder', { path: targetPath });
+        await createFolder(targetPath);
       } else {
-        await invoke('create_vfs_file', { path: targetPath });
+        await createFile(targetPath);
       }
       setShowCreateModal(false);
       loadVfs();
@@ -430,11 +487,10 @@ const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (fileP
 
   const handleDeleteConfirm = async () => {
     try {
-      const { invoke } = await import('@tauri-apps/api/core');
       const allItems = [...selectedItems].map(p => findNodeByRelPath(currentChildren, p)).filter(Boolean) as DirNode[];
       for (const item of allItems) {
         const targetPath = vfsPath(item.name);
-        await invoke('move_vfs_to_trash', { path: targetPath, isDirectory: item.isDirectory });
+        await moveToTrash(targetPath);
       }
       setSelectedItems(new Set());
       setShowDeleteConfirm(false);
@@ -450,12 +506,8 @@ const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (fileP
 
   const handleOpenFile = async (name: string, relPath: string) => {
     try {
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const { invoke } = await import('@tauri-apps/api/core');
       const targetPath = vfsPath(relPath);
-      const savePath = await save({ defaultPath: name });
-      if (!savePath) return;
-      await invoke('download_vfs_file', { vfsPath: targetPath, localPath: savePath });
+      downloadVfsFile(targetPath, name);
       recordRecent(name, relPath, false);
     } catch (e) {
       console.warn('[FileManager] open file failed:', e);
@@ -466,13 +518,9 @@ const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (fileP
     const files = [...selectedItems].map(p => findNodeByRelPath(currentChildren, p)).filter(Boolean).filter(n => n && !n.isDirectory) as DirNode[];
     if (files.length === 0) return;
     try {
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const { invoke } = await import('@tauri-apps/api/core');
       for (const file of files) {
         const targetPath = vfsPath(file.name);
-        const savePath = await save({ defaultPath: file.name });
-        if (!savePath) continue;
-        await invoke('download_vfs_file', { vfsPath: targetPath, localPath: savePath });
+        downloadVfsFile(targetPath, file.name);
       }
       setSelectedItems(new Set());
     } catch (e) {
@@ -482,35 +530,45 @@ const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (fileP
 
   // ── upload ──
 
-  const handleUploadFile = async () => {
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({ multiple: true }) as string[] | string | null;
-      if (!selected) return;
-      const paths = Array.isArray(selected) ? selected : [selected];
-      const { invoke } = await import('@tauri-apps/api/core');
-      for (const filePath of paths) {
-        await invoke('upload_vfs_file', { localPath: filePath, vfsFolder: vfsPath('') });
+  const handleUploadFile = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.onchange = async () => {
+      if (!input.files) return;
+      try {
+        const folder = vfsPath('');
+        for (const file of Array.from(input.files)) {
+          await uploadFile(file, folder);
+        }
+        loadVfs();
+      } catch (e) {
+        console.warn('[FileManager] upload file failed:', e);
       }
-      loadVfs();
-    } catch (e) {
-      console.warn('[FileManager] upload file failed:', e);
-    }
+    };
+    input.click();
   };
 
-  const handleUploadFolder = async () => {
-    try {
-      const { open } = await import('@tauri-apps/plugin-dialog');
-      const selected = await open({ directory: true, multiple: false }) as string | null;
-      if (!selected) return;
-      const dirPath = selected;
-      const dirName = dirPath.split(/[\\/]/).pop() || 'upload';
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('upload_vfs_folder', { localDir: dirPath, vfsFolder: vfsPath(dirName) + '/' });
-      loadVfs();
-    } catch (e) {
-      console.warn('[FileManager] upload folder failed:', e);
-    }
+  const handleUploadFolder = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.setAttribute('webkitdirectory', '');
+    (input as HTMLInputElement).directory = true;
+    input.onchange = async () => {
+      if (!input.files) return;
+      try {
+        for (const file of Array.from(input.files)) {
+          const relativePath = file.webkitRelativePath;
+          const slashIdx = relativePath.indexOf('/');
+          const vfsRelPath = slashIdx >= 0 ? relativePath.substring(slashIdx + 1) : relativePath;
+          await uploadFile(file, vfsPath(vfsRelPath));
+        }
+        loadVfs();
+      } catch (e) {
+        console.warn('[FileManager] upload folder failed:', e);
+      }
+    };
+    input.click();
   };
 
   const SORT_LABELS: Record<SortKey, string> = { name: '文件名', time: '修改时间', type: '类型', size: '大小' };

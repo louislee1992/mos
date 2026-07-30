@@ -15,6 +15,7 @@ import { xml } from '@codemirror/lang-xml';
 import { sql } from '@codemirror/lang-sql';
 import { rust } from '@codemirror/lang-rust';
 import { python } from '@codemirror/lang-python';
+import { readText, writeText } from '../api/vfs';
 
 const LANG_BY_EXT: Record<string, () => Extension> = {
   md: () => markdown(),
@@ -68,8 +69,7 @@ const TextEditor: FC<TextEditorProps> = ({ filePath, fileName, onDirtyChange, on
     setSaveStatus('saving');
     try {
       const content = viewRef.current.state.doc.toString();
-      const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('write_vfs_text', { path: filePath, content });
+      await writeText(filePath, content);
       setDirty(false);
       setSaveStatus('saved');
       setTimeout(() => setSaveStatus('idle'), 2000);
@@ -82,8 +82,7 @@ const TextEditor: FC<TextEditorProps> = ({ filePath, fileName, onDirtyChange, on
   useEffect(() => {
     const loadContent = async () => {
       try {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const text = await invoke<string>('read_vfs_text', { path: filePath });
+        const { content: text } = await readText(filePath);
         setLoading(false);
 
         if (!editorRef.current) return;

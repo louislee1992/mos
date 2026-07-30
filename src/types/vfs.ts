@@ -1,8 +1,7 @@
 export interface VfsEntry {
   name: string;
   path: string;
-  isFolder: boolean;
+  type: string;  // "file" | "folder"
   size: number;
   lastModified: string;
-  contentType: string;
 }
