@@ -29,6 +29,15 @@ public class VfsController {
         return (String) req.getAttribute("accessKey");
     }
 
+    private ResponseEntity<?> requireFields(Map<String, String> body, String... fields) {
+        for (String field : fields) {
+            if (body.get(field) == null || body.get(field).isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Missing required field: " + field));
+            }
+        }
+        return null;
+    }
+
     @GetMapping
     public ResponseEntity<?> listVfs(@RequestParam(defaultValue = "") String path, HttpServletRequest req) {
         try {
@@ -42,6 +51,8 @@ public class VfsController {
     @PostMapping("/folder")
     public ResponseEntity<?> createFolder(@RequestBody Map<String, String> body, HttpServletRequest req) {
         try {
+            ResponseEntity<?> err = requireFields(body, "path");
+            if (err != null) return err;
             vfsService.createFolder(getClient(req), getAccessKey(req), body.get("path"));
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (Exception e) {
@@ -52,6 +63,8 @@ public class VfsController {
     @PostMapping("/file")
     public ResponseEntity<?> createFile(@RequestBody Map<String, String> body, HttpServletRequest req) {
         try {
+            ResponseEntity<?> err = requireFields(body, "path");
+            if (err != null) return err;
             vfsService.createFile(getClient(req), getAccessKey(req), body.get("path"));
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (Exception e) {
@@ -64,6 +77,9 @@ public class VfsController {
                                         @RequestParam("path") String path,
                                         HttpServletRequest req) {
         try {
+            if (path == null || path.isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of("error", "Missing required field: path"));
+            }
             vfsService.createFile(getClient(req), getAccessKey(req), path);
             return ResponseEntity.ok(Map.of("ok", true, "size", file.getSize()));
         } catch (Exception e) {
@@ -99,6 +115,8 @@ public class VfsController {
     @PutMapping("/text")
     public ResponseEntity<?> writeText(@RequestBody Map<String, String> body, HttpServletRequest req) {
         try {
+            ResponseEntity<?> err = requireFields(body, "path", "content");
+            if (err != null) return err;
             vfsService.writeText(getClient(req), getAccessKey(req), body.get("path"), body.get("content"));
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (Exception e) {
@@ -109,6 +127,8 @@ public class VfsController {
     @PostMapping("/copy")
     public ResponseEntity<?> copyVfs(@RequestBody Map<String, String> body, HttpServletRequest req) {
         try {
+            ResponseEntity<?> err = requireFields(body, "source", "dest");
+            if (err != null) return err;
             vfsService.copyVfs(getClient(req), getAccessKey(req), body.get("source"), body.get("dest"));
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (Exception e) {
@@ -119,6 +139,8 @@ public class VfsController {
     @PutMapping("/rename")
     public ResponseEntity<?> renameVfs(@RequestBody Map<String, String> body, HttpServletRequest req) {
         try {
+            ResponseEntity<?> err = requireFields(body, "oldPath", "newPath");
+            if (err != null) return err;
             vfsService.renameVfs(getClient(req), getAccessKey(req), body.get("oldPath"), body.get("newPath"));
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (Exception e) {
@@ -139,6 +161,8 @@ public class VfsController {
     @PostMapping("/trash")
     public ResponseEntity<?> moveToTrash(@RequestBody Map<String, String> body, HttpServletRequest req) {
         try {
+            ResponseEntity<?> err = requireFields(body, "path");
+            if (err != null) return err;
             vfsService.moveToTrash(getClient(req), getAccessKey(req), body.get("path"));
             return ResponseEntity.ok(Map.of("ok", true));
         } catch (Exception e) {

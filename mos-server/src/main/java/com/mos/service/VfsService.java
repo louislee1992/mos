@@ -8,6 +8,7 @@ import io.minio.messages.Item;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -70,7 +71,7 @@ public class VfsService {
     public String readText(MinioClient client, String accessKey, String path) throws Exception {
         String bucket = MinioConfig.deriveBucketName(accessKey);
         String s3Key = "vfs/" + path.replaceAll("^/", "");
-        return new String(minioService.downloadFile(client, bucket, s3Key));
+        return new String(minioService.downloadFile(client, bucket, s3Key), StandardCharsets.UTF_8);
     }
 
     public void writeText(MinioClient client, String accessKey, String path, String content) throws Exception {
