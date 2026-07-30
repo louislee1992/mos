@@ -109,38 +109,40 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
       setCredentials(ep, ak, sk);
 
       const now = Date.now();
-      const existing = accounts.find(
-        (a) => a.endpoint === ep && a.accessKey === ak,
-      );
       let host = ep;
       try {
         host = new URL(ep).host;
       } catch {
         /* keep raw */
       }
-      const entry: AccountEntry = {
-        id: existing?.id ?? crypto.randomUUID(),
-        name: `MinIO @ ${host}`,
-        endpoint: ep,
-        accessKey: ak,
-        secretKey: sk,
-        isAdmin: existing?.isAdmin ?? false,
-        createdAt: existing?.createdAt ?? now,
-        lastUsedAt: now,
-      };
-      const updated = accounts.filter(
-        (a) => !(a.endpoint === ep && a.accessKey === ak),
-      );
-      updated.push(entry);
-      saveAccounts(updated);
-      setAccounts(updated);
+      setAccounts((prev) => {
+        const existing = prev.find(
+          (a) => a.endpoint === ep && a.accessKey === ak,
+        );
+        const entry: AccountEntry = {
+          id: existing?.id ?? crypto.randomUUID(),
+          name: `MinIO @ ${host}`,
+          endpoint: ep,
+          accessKey: ak,
+          secretKey: sk,
+          isAdmin: existing?.isAdmin ?? false,
+          createdAt: existing?.createdAt ?? now,
+          lastUsedAt: now,
+        };
+        const updated = prev.filter(
+          (a) => !(a.endpoint === ep && a.accessKey === ak),
+        );
+        updated.push(entry);
+        saveAccounts(updated);
+        return updated;
+      });
       onLoginSuccess(ak);
     } catch (err) {
       setError(err instanceof Error ? err.message : '连接失败');
     } finally {
       setLoading(false);
     }
-  }, [accounts, onLoginSuccess]);
+  }, [onLoginSuccess]);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -238,13 +240,14 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                       </button>
                       <button
                         type="button"
+                        disabled={loading}
                         onClick={(e) => {
                           e.stopPropagation();
                           handleDeleteAccount(acc.id);
                         }}
                         className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500/80 text-white
                                    flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100
-                                   transition-opacity cursor-pointer hover:bg-red-500"
+                                   transition-opacity cursor-pointer hover:bg-red-500 disabled:opacity-30"
                       >
                         &#x00D7;
                       </button>
