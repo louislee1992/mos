@@ -507,7 +507,7 @@ const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (fileP
   const handleOpenFile = async (name: string, relPath: string) => {
     try {
       const targetPath = vfsPath(relPath);
-      downloadVfsFile(targetPath, name);
+      await downloadVfsFile(targetPath, name);
       recordRecent(name, relPath, false);
     } catch (e) {
       console.warn('[FileManager] open file failed:', e);
@@ -520,7 +520,7 @@ const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (fileP
     try {
       for (const file of files) {
         const targetPath = vfsPath(file.name);
-        downloadVfsFile(targetPath, file.name);
+        await downloadVfsFile(targetPath, file.name);
       }
       setSelectedItems(new Set());
     } catch (e) {
