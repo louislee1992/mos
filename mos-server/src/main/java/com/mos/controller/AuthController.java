@@ -19,9 +19,19 @@ public class AuthController {
 
     @PostMapping("/verify")
     public ResponseEntity<?> verify(@RequestBody Map<String, String> body) {
-        String endpoint = body.get("endpoint").trim().replaceAll("/$", "");
-        String accessKey = body.get("accessKey").trim();
-        String secretKey = body.get("secretKey").trim();
+        String rawEndpoint = body.get("endpoint");
+        String rawAccessKey = body.get("accessKey");
+        String rawSecretKey = body.get("secretKey");
+
+        if (rawEndpoint == null || rawEndpoint.isBlank() ||
+            rawAccessKey == null || rawAccessKey.isBlank() ||
+            rawSecretKey == null || rawSecretKey.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "endpoint、accessKey 和 secretKey 不能为空"));
+        }
+
+        String endpoint = rawEndpoint.trim().replaceAll("/$", "");
+        String accessKey = rawAccessKey.trim();
+        String secretKey = rawSecretKey.trim();
 
         if (!endpoint.startsWith("http://") && !endpoint.startsWith("https://")) {
             return ResponseEntity.badRequest().body(Map.of("error", "Endpoint 必须以 http:// 或 https:// 开头"));
