@@ -54,9 +54,12 @@ public class TrashController {
 
     @PostMapping("/restore")
     public ResponseEntity<?> restore(@RequestBody Map<String, String> body, HttpServletRequest req) {
+        String trashPath = body.get("trashPath");
+        String originalPath = body.get("originalPath");
+        if (trashPath == null || trashPath.isBlank() || originalPath == null || originalPath.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "trashPath and originalPath are required"));
+        }
         try {
-            String trashPath = body.get("trashPath");
-            String originalPath = body.get("originalPath");
             MinioClient client = getClient(req);
             String bucket = getBucket(req);
             minioService.copyObject(client, bucket, trashPath, "vfs/" + originalPath.replaceAll("^/", ""));
