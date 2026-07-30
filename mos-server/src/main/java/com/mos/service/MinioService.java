@@ -1,5 +1,6 @@
 package com.mos.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.minio.*;
 import io.minio.http.Method;
@@ -27,6 +28,21 @@ public class MinioService {
     public <T> T readJsonOrDefault(MinioClient client, String bucket, String key, Class<T> clazz, T defaultVal) {
         try {
             return readJson(client, bucket, key, clazz);
+        } catch (Exception e) {
+            return defaultVal;
+        }
+    }
+
+    public <T> T readJson(MinioClient client, String bucket, String key, TypeReference<T> typeRef) throws Exception {
+        GetObjectResponse resp = client.getObject(
+                GetObjectArgs.builder().bucket(bucket).object(key).build());
+        byte[] data = resp.readAllBytes();
+        return objectMapper.readValue(data, typeRef);
+    }
+
+    public <T> T readJsonOrDefault(MinioClient client, String bucket, String key, TypeReference<T> typeRef, T defaultVal) {
+        try {
+            return readJson(client, bucket, key, typeRef);
         } catch (Exception e) {
             return defaultVal;
         }
