@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-import { invoke } from '@tauri-apps/api/core';
+import { getVersion } from './api/auth';
+import { getCredentials } from './api/client';
 import { getWallpaperBackground, defaultWallpaperId } from './data/wallpapers';
 import { desktopApps, type DesktopApp } from './data/apps';
 import { useSettings } from './hooks/useSettings';
@@ -48,8 +48,8 @@ function App() {
   }, []);
 
   useEffect(() => {
-    invoke<string>('get_app_version').then((v) => {
-      getCurrentWindow().setTitle(`MOS — 基于 MinIO 的云桌面 v${v}`);
+    getVersion().then((data) => {
+      document.title = `MOS — 基于 MinIO 的云桌面 v${data.version}`;
     });
   }, []);
 
@@ -57,9 +57,19 @@ function App() {
     if (settings?.wallpaperType === 'custom' && settings?.customWallpapers?.length) {
       const cw = settings.customWallpapers.find(w => w.id === settings.wallpaperId);
       if (cw) {
-        invoke<number[]>('read_config_file', { key: cw.key.replace('config/', '') })
-          .then(data => {
-            const blob = new Blob([new Uint8Array(data)]);
+        const key = cw.key.replace('config/', '');
+        const creds = getCredentials();
+        fetch(`${creds.endpoint}/api/config/${encodeURIComponent(key)}`, {
+          headers: {
+            'Authorization': 'Basic ' + btoa(`${creds.accessKey}:${creds.secretKey}`),
+            'X-Minio-Endpoint': creds.endpoint,
+          },
+        })
+          .then(res => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.blob();
+          })
+          .then(blob => {
             const url = URL.createObjectURL(blob);
             setCustomWallpaperUrl(url);
           })
@@ -249,12 +259,12 @@ function App() {
   }, [openApp]);
 
   const handleExit = useCallback(() => {
-    console.log('[App] handleExit called, attempting getCurrentWindow().close()');
+    console.log('[App] handleExit called, attempting window.close()');
     try {
-      getCurrentWindow().close();
-      console.log('[App] getCurrentWindow().close() executed');
+      window.close();
+      console.log('[App] window.close() executed');
     } catch (e) {
-      console.error('[App] getCurrentWindow().close() failed:', e);
+      console.error('[App] window.close() failed:', e);
     }
   }, []);
 

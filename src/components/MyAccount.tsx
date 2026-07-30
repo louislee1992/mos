@@ -1,8 +1,10 @@
 import { type FC, useState, useEffect, useRef } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import type { AccountEntry, AccountsData } from '../types/accounts';
+import type { AccountEntry } from '../types/accounts';
 import type { UserSettings, CustomWallpaper, DeviceInfo } from '../types/settings';
 import { wallpapers, defaultWallpaperId } from '../data/wallpapers';
+import { getDeviceInfo } from '../api/system';
+import { uploadConfig, deleteConfig } from '../api/settings';
+import { getCredentials } from '../api/client';
 
 interface MyAccountProps {
   accessKey: string | null;
@@ -32,15 +34,19 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
 
   /* Load accounts on mount */
   useEffect(() => {
-    invoke<AccountsData>('load_accounts')
-      .then((data) => setAccounts(data.accounts))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    try {
+      const raw = localStorage.getItem('mos-accounts');
+      setAccounts(raw ? JSON.parse(raw) : []);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   /* Load device info on mount */
   useEffect(() => {
-    invoke<DeviceInfo>('get_device_info')
+    getDeviceInfo()
       .then(setDeviceInfo)
       .catch(console.error)
       .finally(() => setDeviceInfoLoading(false));
@@ -66,8 +72,16 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
     Promise.all(
       settings.customWallpapers.map(async (cw) => {
         try {
-          const data = await invoke<number[]>('read_config_file', { key: cw.key });
-          const blob = new Blob([new Uint8Array(data)]);
+          const key = cw.key.replace('config/', '');
+          const creds = getCredentials();
+          const res = await fetch(`${creds.endpoint}/api/config/${encodeURIComponent(key)}`, {
+            headers: {
+              'Authorization': 'Basic ' + btoa(`${creds.accessKey}:${creds.secretKey}`),
+              'X-Minio-Endpoint': creds.endpoint,
+            },
+          });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const blob = await res.blob();
           const url = URL.createObjectURL(blob);
           urls.push(url);
           return { id: cw.id, url };
@@ -101,8 +115,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
     const ext = file.name.split('.').pop() || 'png';
     const id = crypto.randomUUID();
     const key = `wallpapers/${id}.${ext}`;
-    const buf = await file.arrayBuffer();
-    await invoke('upload_config_file', { key, data: Array.from(new Uint8Array(buf)) });
+    await uploadConfig(file, key);
     const newCw: CustomWallpaper = { id, name: file.name, key: `config/${key}` };
     const updated = [...(settings?.customWallpapers ?? []), newCw];
     onUpdateSettings({ customWallpapers: updated });
@@ -111,7 +124,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
 
   const handleDeleteCustom = async (cw: CustomWallpaper) => {
     try {
-      await invoke('delete_config_file', { key: cw.key });
+      await deleteConfig(cw.key);
       const updated = (settings?.customWallpapers ?? []).filter((c) => c.id !== cw.id);
       onUpdateSettings({ customWallpapers: updated });
     } catch (err) {
