@@ -1,7 +1,7 @@
 import { type FC, useState, useEffect, useRef } from 'react';
 import type { AccountEntry } from '../types/accounts';
 import type { UserSettings, CustomWallpaper, DeviceInfo } from '../types/settings';
-import { wallpapers, defaultWallpaperId } from '../data/wallpapers';
+import { wallpapers } from '../data/wallpapers';
 import { getDeviceInfo } from '../api/system';
 import { uploadConfig, deleteConfig } from '../api/settings';
 import { getCredentials } from '../api/client';
@@ -10,6 +10,7 @@ interface MyAccountProps {
   accessKey: string | null;
   settings: UserSettings | null;
   onUpdateSettings: (patch: Partial<UserSettings>) => void;
+  initialTab?: string;
 }
 
 type TabId = 'account' | 'theme' | 'devices';

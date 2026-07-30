@@ -16,7 +16,7 @@ interface ChatViewProps {
 
 const ChatView: FC<ChatViewProps> = ({
   convId, conversations, messages, loading, currentUserKey,
-  allProfiles, myProfile, onSendMessage, onAddMembers,
+  allProfiles, onSendMessage, onAddMembers,
   onUploadFile, onSendCloudFile, onCaptureScreenshot, onDownloadFile,
 }) => {
   const [input, setInput] = useState('');

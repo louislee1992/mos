@@ -1,6 +1,8 @@
 package com.mos.controller;
 
+import com.mos.config.MinioConfig;
 import com.mos.model.VfsEntry;
+import com.mos.service.MinioService;
 import com.mos.service.VfsService;
 import io.minio.MinioClient;
 import jakarta.servlet.http.HttpServletRequest;
@@ -20,6 +22,7 @@ import java.util.Map;
 public class VfsController {
 
     private final VfsService vfsService;
+    private final MinioService minioService;
 
     private MinioClient getClient(HttpServletRequest req) {
         return (MinioClient) req.getAttribute("minioClient");
@@ -80,7 +83,10 @@ public class VfsController {
             if (path == null || path.isBlank()) {
                 return ResponseEntity.badRequest().body(Map.of("error", "Missing required field: path"));
             }
-            vfsService.createFile(getClient(req), getAccessKey(req), path);
+            String bucket = MinioConfig.deriveBucketName(getAccessKey(req));
+            String s3Key = "vfs/" + path.replaceAll("^/", "");
+            minioService.uploadFile(getClient(req), bucket, s3Key, file.getInputStream(),
+                    file.getSize(), file.getContentType());
             return ResponseEntity.ok(Map.of("ok", true, "size", file.getSize()));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));

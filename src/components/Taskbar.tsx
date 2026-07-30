@@ -39,6 +39,12 @@ interface TaskbarProps {
   onLogout: () => void;
   /** 退出应用程序 */
   onExit: () => void;
+  /** 打开设置窗口 */
+  onOpenSettings: () => void;
+  /** 打开我的账户窗口 */
+  onOpenMyAccount: () => void;
+  /** 当前登录的 accessKey */
+  accessKey: string | null;
 }
 
 /**

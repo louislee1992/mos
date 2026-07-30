@@ -27,14 +27,3 @@ export interface UserProfile {
   createdAt: number;
 }
 
-export interface RedisConfig {
-  host: string;
-  port: number;
-  password?: string;
-}
-
-export interface RedisStatus {
-  connected: boolean;
-  host: string;
-  port: number;
-}

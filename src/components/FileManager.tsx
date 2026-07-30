@@ -273,7 +273,15 @@ function entriesToTree(entries: VfsEntry[]): DirNode[] {
 
 // ── FileManager ──
 
-const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (filePath: string, fileName: string) => void }> = ({ onOpenApp, onOpenFile }) => {
+const FileManager: FC<{
+  onOpenApp?: (appId: string) => void;
+  onOpenFile?: (filePath: string, fileName: string) => void;
+  onOpenFileManagerAt?: (initialPath: string[]) => void;
+  initialPath?: string[];
+  onAddUploadTask?: (fileName: string, vfsPath: string, totalBytes: number) => string;
+  onAddDownloadTask?: (vfsPath: string, fileName: string, sizeBytes: number) => string;
+  onAddMoveTask?: (fromVfsPath: string, fileName: string, sizeBytes: number) => string;
+}> = ({ onOpenApp, onOpenFile, onOpenFileManagerAt: _onOpenFileManagerAt, initialPath: _initialPath, onAddUploadTask: _onAddUploadTask, onAddDownloadTask: _onAddDownloadTask, onAddMoveTask: _onAddMoveTask }) => {
   const [activeNav, setActiveNav] = useState<NavKey>('my-files');
   const [selectedPath, setSelectedPath] = useState<string[]>(['我的文件']);
   const [searchQuery, setSearchQuery] = useState('');
@@ -553,7 +561,7 @@ const FileManager: FC<{ onOpenApp?: (appId: string) => void; onOpenFile?: (fileP
     const input = document.createElement('input');
     input.type = 'file';
     input.setAttribute('webkitdirectory', '');
-    (input as HTMLInputElement).directory = true;
+    (input as HTMLInputElement).setAttribute('directory', '');
     input.onchange = async () => {
       if (!input.files) return;
       try {

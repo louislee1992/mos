@@ -40,6 +40,10 @@ function getAccountColor(id: string): string {
   return `hsl(${hue}, 55%, 45%)`;
 }
 
+// WARNING: credentials (including secretKey) are stored as plaintext in localStorage.
+// This is a known limitation of the web migration — the browser offers no secure
+// equivalent to Tauri's OS-level encrypted file storage. Restrict access to the
+// host machine accordingly.
 const ACCOUNTS_KEY = 'mos-accounts';
 
 function loadAccounts(): AccountEntry[] {
