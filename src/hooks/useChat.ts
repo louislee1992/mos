@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useWebSocket } from './useWebSocket';
-import { getCredentials } from '../api/client';
+import { apiDownloadBlob } from '../api/client';
 import {
   listProfiles,
   myProfile as myProfileApi,
@@ -342,25 +342,10 @@ export function useChat(accessKey: string | null | undefined) {
   const downloadFile = useCallback(
     async (s3Key: string, filename: string) => {
       try {
-        const creds = getCredentials();
-        const res = await fetch(
-          `${creds.endpoint}/api/chat/download?s3Key=${encodeURIComponent(s3Key)}`,
-          {
-            headers: {
-              Authorization:
-                'Basic ' + btoa(`${creds.accessKey}:${creds.secretKey}`),
-              'X-Minio-Endpoint': creds.endpoint,
-            },
-          },
+        await apiDownloadBlob(
+          `/api/chat/download?s3Key=${encodeURIComponent(s3Key)}`,
+          filename,
         );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
         showToast('文件已下载');
       } catch (e) {
         showToast(`下载失败: ${e}`);
