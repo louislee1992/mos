@@ -13,7 +13,7 @@ dist-ssr
 *.local
 
 # Java build output
-mos-server/target/
+target/
 
 # Editor directories and files
 .vscode/*

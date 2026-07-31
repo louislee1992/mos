@@ -1,6 +1,0 @@
-com\mos\config\WebSocketConfig.class
-com\mos\config\MinioConfig.class
-com\mos\config\SpaFallbackConfig.class
-com\mos\MosApplication.class
-com\mos\config\WebMvcConfig.class
-com\mos\interceptor\AuthInterceptor.class
