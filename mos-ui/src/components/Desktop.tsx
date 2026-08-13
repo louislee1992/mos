@@ -9,7 +9,7 @@
  * @component Desktop
  */
 
-import { type FC, useState } from 'react';
+import { type FC, useState, useEffect } from 'react';
 import { wallpapers } from '../data/wallpapers';
 import DesktopIcon from './DesktopIcon';
 import type { DesktopApp } from '../data/apps';
@@ -28,6 +28,8 @@ interface DesktopProps {
   onOpenApp: (appId: string) => void;
   /** 切换壁纸的回调，传入新的 wallpaper.id */
   onWallpaperChange: (id: string) => void;
+  /** 打开设置窗体并选中主题壁纸 Tab */
+  onOpenSettingsTheme?: () => void;
 }
 
 /**
@@ -44,18 +46,32 @@ const Desktop: FC<DesktopProps> = ({
   desktopApps,
   onOpenApp,
   onWallpaperChange,
+  onOpenSettingsTheme,
 }) => {
   /** 控制壁纸选择面板的显示/隐藏 */
   const [showPicker, setShowPicker] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; visible: boolean }>({ x: 0, y: 0, visible: false });
+
+  useEffect(() => {
+    if (!ctxMenu.visible) return;
+    const close = () => setCtxMenu(c => ({ ...c, visible: false }));
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [ctxMenu.visible]);
 
   return (
     <div
       className="desktop-area"
       style={{ background }}
       onContextMenu={(e) => {
-        // 阻止浏览器默认右键菜单，切换壁纸选择器
         e.preventDefault();
-        setShowPicker(!showPicker);
+        const menuW = 200;
+        const menuH = 40;
+        let sx = e.clientX;
+        let sy = e.clientY;
+        if (sx + menuW > window.innerWidth) sx = e.clientX - menuW;
+        if (sy + menuH > window.innerHeight) sy = e.clientY - menuH;
+        setCtxMenu({ x: sx, y: sy, visible: true });
       }}
     >
       {customWallpaperUrl && (
@@ -80,7 +96,7 @@ const Desktop: FC<DesktopProps> = ({
             key={app.id}
             icon={app.icon}
             label={app.name}
-            onDoubleClick={() => onOpenApp(app.id)}
+            onClick={() => onOpenApp(app.id)}
           />
         ))}
       </div>
@@ -131,6 +147,23 @@ const Desktop: FC<DesktopProps> = ({
         <p className="desktop-pagination-hint">
           右键桌面空白处可关闭壁纸选择 — 点击色块切换壁纸
         </p>
+      )}
+
+      {ctxMenu.visible && (
+        <div className="fm-ctxmenu" style={{ left: ctxMenu.x, top: ctxMenu.y, position: 'fixed' }}>
+          <button className="fm-ctxmenu-item" onClick={() => {
+            setCtxMenu(c => ({ ...c, visible: false }));
+            onOpenSettingsTheme?.();
+          }}>
+            <span className="fm-ctxmenu-icon">
+              <svg viewBox="0 0 64 64" fill="none" width="14" height="14">
+                <path d="M32 40a8 8 0 1 0 0-16 8 8 0 0 0 0 16Z" stroke="currentColor" strokeWidth="3" fill="none" />
+                <path d="M51.7 40a4.4 4.4 0 0 0 .88 4.85l.16.16a5.33 5.33 0 1 1-7.54 7.54l-.16-.16a4.4 4.4 0 0 0-4.85-.88 4.4 4.4 0 0 0-2.67 4.03V56a5.33 5.33 0 0 1-10.66 0v-.24a4.4 4.4 0 0 0-2.67-4.03 4.4 4.4 0 0 0-4.85.88l-.16.16a5.33 5.33 0 1 1-7.54-7.54l.16-.16A4.4 4.4 0 0 0 12.46 40a4.4 4.4 0 0 0-4.03-2.67H8a5.33 5.33 0 0 1 0-10.66h.24a4.4 4.4 0 0 0 4.03-2.67 4.4 4.4 0 0 0-.88-4.85l-.16-.16a5.33 5.33 0 1 1 7.54-7.54l.16.16A4.4 4.4 0 0 0 24 12.46a4.4 4.4 0 0 0 2.67-4.03V8a5.33 5.33 0 0 1 10.66 0v.24a4.4 4.4 0 0 0 2.67 4.03 4.4 4.4 0 0 0 4.85-.88l.16-.16a5.33 5.33 0 1 1 7.54 7.54l-.16.16A4.4 4.4 0 0 0 51.7 24a4.4 4.4 0 0 0 4.03 2.67H56a5.33 5.33 0 0 1 0 10.66h-.24a4.4 4.4 0 0 0-4.03 2.67Z" stroke="currentColor" strokeWidth="3" fill="none" />
+              </svg>
+            </span>
+            <span>更换主题壁纸</span>
+          </button>
+        </div>
       )}
     </div>
   );
