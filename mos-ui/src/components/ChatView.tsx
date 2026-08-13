@@ -1,6 +1,8 @@
 import { type FC, useState, useRef, useEffect } from 'react';
 import type { ChatMessage, ConversationMeta, UserProfile } from '../types/chat';
 import EmojiPicker from './EmojiPicker';
+import { AnimatePresence } from 'framer-motion';
+import ImageLightbox from './ImageLightbox';
 
 interface ChatViewProps {
   convId: string; conversations: ConversationMeta[];
@@ -22,6 +24,7 @@ const ChatView: FC<ChatViewProps> = ({
   const [input, setInput] = useState('');
   const [showEmoji, setShowEmoji] = useState(false);
   const [showAddMembers, setShowAddMembers] = useState(false);
+  const [viewImage, setViewImage] = useState<string | null>(null);
   const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -96,7 +99,7 @@ const ChatView: FC<ChatViewProps> = ({
               <div className={`message-bubble${isSelf ? ' message-bubble-self' : ''}`}>
                 {!isSelf && <div className="message-sender">{msg.senderName}</div>}
                 {msg.type === 'system' ? <div className="message-system">{msg.content}</div>
-                 : msg.type === 'image' ? <img src={msg.content} alt="截图" className="message-image" />
+                 : msg.type === 'image' ? <img src={msg.content} alt="截图" className="message-image" onClick={() => setViewImage(msg.content)} />
                  : msg.type === 'file' ? (
                   <div className="message-file">
                     <svg viewBox="0 0 16 16" width="14" height="14" fill="none"><path d="M4 1h5l3 3v10a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1z" fill="#6b7280" stroke="#4b5563" strokeWidth="0.8"/><path d="M9 1v3h3" fill="none" stroke="#4b5563" strokeWidth="0.8"/></svg>
@@ -159,6 +162,10 @@ const ChatView: FC<ChatViewProps> = ({
           </div>
         </div>
       )}
+
+      <AnimatePresence>
+        {viewImage && <ImageLightbox src={viewImage} onClose={() => setViewImage(null)} />}
+      </AnimatePresence>
     </div>
   );
 };
