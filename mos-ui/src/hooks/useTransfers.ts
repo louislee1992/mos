@@ -4,10 +4,13 @@ export interface TransferTask {
   id: string;
   fileName: string;
   vfsPath: string;
+  sourcePath?: string;
+  destPath?: string;
   direction: 'upload' | 'download' | 'move';
   totalBytes: number;
   transferredBytes: number;
   status: 'transferring' | 'completed' | 'failed';
+  writingToStorage?: boolean;
   error?: string;
   createdAt: number;
   completedAt?: number;
@@ -17,7 +20,11 @@ export interface UseTransfersResult {
   tasks: TransferTask[];
   addUploadTask: (fileName: string, vfsPath: string, totalBytes: number) => string;
   addDownloadTask: (fileName: string, vfsPath: string, totalBytes: number) => string;
-  addMoveTask: (fileName: string, vfsPath: string, totalBytes: number) => string;
+  addMoveTask: (fileName: string, vfsPath: string, totalBytes: number, sourcePath?: string, destPath?: string) => string;
+  completeTask: (id: string, transferredBytes?: number) => void;
+  failTask: (id: string, error: string) => void;
+  updateTask: (id: string, transferredBytes: number) => void;
+  setTaskWriting: (id: string) => void;
   clearCompleted: () => void;
   clearAll: () => void;
 }
@@ -86,12 +93,14 @@ export function useTransfers(): UseTransfersResult {
   );
 
   const addMoveTask = useCallback(
-    (fileName: string, vfsPath: string, totalBytes: number): string => {
+    (fileName: string, vfsPath: string, totalBytes: number, sourcePath?: string, destPath?: string): string => {
       const id = generateId();
       const task: TransferTask = {
         id,
         fileName,
         vfsPath,
+        sourcePath,
+        destPath,
         direction: 'move',
         totalBytes,
         transferredBytes: totalBytes,
@@ -105,6 +114,36 @@ export function useTransfers(): UseTransfersResult {
     [],
   );
 
+  const completeTask = useCallback((id: string, transferredBytes?: number) => {
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === id
+          ? { ...t, status: 'completed' as const, transferredBytes: transferredBytes ?? t.totalBytes, completedAt: now(), writingToStorage: false }
+          : t,
+      ),
+    );
+  }, []);
+
+  const failTask = useCallback((id: string, error: string) => {
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === id ? { ...t, status: 'failed' as const, error, completedAt: now(), writingToStorage: false } : t,
+      ),
+    );
+  }, []);
+
+  const updateTask = useCallback((id: string, transferredBytes: number) => {
+    setTasks((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, transferredBytes } : t)),
+    );
+  }, []);
+
+  const setTaskWriting = useCallback((id: string) => {
+    setTasks((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, writingToStorage: true } : t)),
+    );
+  }, []);
+
   const clearCompleted = useCallback(() => {
     setTasks((prev) => prev.filter((t) => t.status === 'transferring'));
   }, []);
@@ -113,5 +152,5 @@ export function useTransfers(): UseTransfersResult {
     setTasks([]);
   }, []);
 
-  return { tasks, addUploadTask, addDownloadTask, addMoveTask, clearCompleted, clearAll };
+  return { tasks, addUploadTask, addDownloadTask, addMoveTask, completeTask, failTask, updateTask, setTaskWriting, clearCompleted, clearAll };
 }

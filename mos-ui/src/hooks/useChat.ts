@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { useWebSocket } from './useWebSocket';
+import { chatBus } from './chatSocket';
 import { apiDownloadBlob } from '../api/client';
 import {
   listProfiles,
@@ -14,8 +14,22 @@ import {
   addGroupMembers,
   uploadChatFile,
   sendCloudFile as sendCloudFileApi,
+  markConversationRead as markConversationReadApi,
 } from '../api/chat';
+import { createShare as createShareApi, listMyShares, listReceivedShares } from '../api/share';
 import type { ChatMessage, ConversationMeta, UserProfile } from '../types/chat';
+import type { ShareRecord } from '../types/share';
+
+const previewOf = (m: ChatMessage) =>
+  m.type === 'text' || m.type === 'emoji'
+    ? m.content
+    : m.type === 'image'
+      ? '[图片]'
+      : m.type === 'file'
+        ? `[文件] ${m.fileName || ''}`
+        : m.type === 'share'
+          ? `[分享] ${m.fileName || ''}`
+          : m.content;
 
 export function useChat(accessKey: string | null | undefined) {
   const [wsConnected, setWsConnected] = useState(false);
@@ -23,6 +37,7 @@ export function useChat(accessKey: string | null | undefined) {
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [onlineUsers, setOnlineUsers] = useState<UserProfile[]>([]);
+  const [shares, setShares] = useState<ShareRecord[]>([]);
   const [allProfiles, setAllProfiles] = useState<UserProfile[]>([]);
   const [myProfile, setMyProfile] = useState<UserProfile>({
     accessKey: accessKey || '', nickname: accessKey || '', avatar: undefined, createdAt: 0,
@@ -33,8 +48,10 @@ export function useChat(accessKey: string | null | undefined) {
   // Refs for latest values used in WebSocket callbacks (avoid stale closures)
   const accessKeyRef = useRef(accessKey);
   const activeConvIdRef = useRef(activeConvId);
+  const conversationsRef = useRef(conversations);
   useEffect(() => { accessKeyRef.current = accessKey; }, [accessKey]);
   useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
+  useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -63,7 +80,18 @@ export function useChat(accessKey: string | null | undefined) {
 
   const refreshConversations = useCallback(async () => {
     try {
-      setConversations(await listConversations());
+      const convs = await listConversations();
+      setConversations(convs);
+      chatBus.emitConversations(convs);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const refreshShares = useCallback(async () => {
+    try {
+      const [mine, received] = await Promise.all([listMyShares(), listReceivedShares()]);
+      setShares([...mine, ...received]);
     } catch {
       // ignore
     }
@@ -85,6 +113,12 @@ export function useChat(accessKey: string | null | undefined) {
   const handleChatMessage = useCallback((msg: unknown) => {
     try {
       const chatMsg = msg as ChatMessage;
+      if (chatMsg.type === 'share') {
+        refreshShares();
+      }
+      if (!conversationsRef.current.some(c => c.id === chatMsg.convId)) {
+        refreshConversations();
+      }
       setConversations(prev => {
         const exists = prev.find(c => c.id === chatMsg.convId);
         if (!exists) return prev;
@@ -93,14 +127,7 @@ export function useChat(accessKey: string | null | undefined) {
             c.id === chatMsg.convId
               ? {
                   ...c,
-                  lastMessage:
-                    chatMsg.type === 'text' || chatMsg.type === 'emoji'
-                      ? chatMsg.content
-                      : chatMsg.type === 'image'
-                        ? '[图片]'
-                        : chatMsg.type === 'file'
-                          ? `[文件] ${chatMsg.fileName || ''}`
-                          : chatMsg.content,
+                  lastMessage: previewOf(chatMsg),
                   lastMessageTime: chatMsg.timestamp,
                 }
               : c,
@@ -120,43 +147,34 @@ export function useChat(accessKey: string | null | undefined) {
     } catch {
       // ignore
     }
-  }, []);
+  }, [refreshConversations, refreshShares]);
 
   const handleOnlineUpdate = useCallback(() => {
     refreshOnlineUsers();
-  }, [refreshOnlineUsers]);
+    refreshProfiles();
+  }, [refreshOnlineUsers, refreshProfiles]);
 
-  const handleWsConnected = useCallback(() => {
-    setWsConnected(true);
+  // ---------------------------------------------------------------------------
+  // Bus subscriptions (WebSocket lives at App level via useChatSocket)
+  // ---------------------------------------------------------------------------
+
+  useEffect(() => chatBus.subscribeConnected(setWsConnected), []);
+  useEffect(() => chatBus.subscribeMessage(handleChatMessage), [handleChatMessage]);
+  useEffect(() => chatBus.subscribeOnline(handleOnlineUpdate), [handleOnlineUpdate]);
+
+  useEffect(() => {
+    chatBus.setActiveConvId(activeConvId);
+    return () => chatBus.setActiveConvId(null);
+  }, [activeConvId]);
+
+  useEffect(() => {
+    if (!wsConnected) return;
     refreshOnlineUsers();
     refreshProfiles();
     refreshConversations();
+    refreshShares();
     loadMyProfile();
-  }, [refreshOnlineUsers, refreshProfiles, refreshConversations, loadMyProfile]);
-
-  const ws = useWebSocket(
-    accessKey,
-    handleChatMessage,
-    handleOnlineUpdate,
-    handleWsConnected,
-  );
-
-  // ---------------------------------------------------------------------------
-  // Connection lifecycle
-  // ---------------------------------------------------------------------------
-
-  const wsConnect = useCallback(() => {
-    ws.connect();
-  }, [ws]);
-
-  const wsDisconnect = useCallback(() => {
-    ws.disconnect();
-    setWsConnected(false);
-    setConversations([]);
-    setMessages([]);
-    setOnlineUsers([]);
-    setAllProfiles([]);
-  }, [ws]);
+  }, [wsConnected, refreshOnlineUsers, refreshProfiles, refreshConversations, refreshShares, loadMyProfile]);
 
   // ---------------------------------------------------------------------------
   // Profile
@@ -190,6 +208,7 @@ export function useChat(accessKey: string | null | undefined) {
         setConversations(prev =>
           prev.find(c => c.id === meta.id) ? prev : [meta, ...prev],
         );
+        markConversationReadApi(meta.id).catch(() => { /* ignore */ });
       } catch (e) {
         showToast(`打开会话失败: ${e}`);
       }
@@ -207,6 +226,7 @@ export function useChat(accessKey: string | null | undefined) {
         setMessages([]);
       }
       setLoadingMsg(false);
+      markConversationReadApi(convId).catch(() => { /* ignore */ });
     },
     [],
   );
@@ -226,11 +246,39 @@ export function useChat(accessKey: string | null | undefined) {
       try {
         const msg = await sendMessageApi(convId, content, msgType, fileName, fileSize);
         setMessages(prev => [...prev, msg]);
+        setConversations(prev =>
+          prev
+            .map(c =>
+              c.id === convId
+                ? { ...c, lastMessage: previewOf(msg), lastMessageTime: msg.timestamp }
+                : c,
+            )
+            .sort((a, b) => b.lastMessageTime - a.lastMessageTime),
+        );
       } catch (e) {
         showToast(`发送失败: ${e}`);
       }
     },
     [showToast],
+  );
+
+  // ---------------------------------------------------------------------------
+  // File share
+  // ---------------------------------------------------------------------------
+
+  const shareVfsFile = useCallback(
+    async (convId: string, vfsPath: string, days: number) => {
+      try {
+        const rec = await createShareApi(vfsPath, days, convId);
+        setShares(prev =>
+          prev.some(s => s.shareId === rec.shareId) ? prev : [rec, ...prev],
+        );
+        await sendMessage(convId, rec.shareId, 'share', rec.name, rec.size);
+      } catch (e) {
+        showToast(`分享失败: ${e}`);
+      }
+    },
+    [sendMessage, showToast],
   );
 
   // ---------------------------------------------------------------------------
@@ -355,24 +403,11 @@ export function useChat(accessKey: string | null | undefined) {
   );
 
   // ---------------------------------------------------------------------------
-  // Cleanup on unmount
-  // ---------------------------------------------------------------------------
-
-  useEffect(() => {
-    return () => {
-      ws.disconnect();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ---------------------------------------------------------------------------
-  // Return (redisStatus -> wsConnected, connect/disconnect replaced)
+  // Return
   // ---------------------------------------------------------------------------
 
   return {
     wsConnected,
-    wsConnect,
-    wsDisconnect,
     conversations,
     activeConvId,
     openConversation,
@@ -381,6 +416,8 @@ export function useChat(accessKey: string | null | undefined) {
     loadingMsg,
     sendMessage,
     onlineUsers,
+    shares,
+    shareVfsFile,
     allProfiles,
     myProfile,
     updateMyProfile,

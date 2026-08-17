@@ -67,14 +67,4 @@ export const desktopApps: DesktopApp[] = [
     title: '聊天',
     singular: true,
   },
-  {
-    id: 'my-account',
-    name: '我的账号',
-    icon: 'user',
-    defaultWidth: 800,
-    defaultHeight: 520,
-    title: '我的账号',
-    showOnDesktop: false,
-    singular: true,
-  },
 ];

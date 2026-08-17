@@ -1,16 +1,18 @@
-import { type FC, useState, useEffect } from 'react';
+import { type FC, useState } from 'react';
 import { useChat } from '../hooks/useChat';
 import ChatSidebar from './ChatSidebar';
 import ChatView from './ChatView';
 import CreateGroupModal from './CreateGroupModal';
+import iconSvgs from '../data/icons';
 
-interface ChatAppProps { accessKey: string | null | undefined; }
+interface ChatAppProps {
+  accessKey: string | null | undefined;
+  unreadCounts: Record<string, number>;
+}
 
-const ChatApp: FC<ChatAppProps> = ({ accessKey }) => {
+const ChatApp: FC<ChatAppProps> = ({ accessKey, unreadCounts }) => {
   const chat = useChat(accessKey);
   const [showGroupModal, setShowGroupModal] = useState(false);
-
-  useEffect(() => { chat.wsConnect(); }, []);
 
   if (!chat.wsConnected) {
     return (
@@ -48,24 +50,23 @@ const ChatApp: FC<ChatAppProps> = ({ accessKey }) => {
         onStartPrivateChat={chat.openConversation}
         onCreateGroup={() => setShowGroupModal(true)}
         onUpdateNickname={(n) => chat.updateMyProfile(n)}
+        unreadCounts={unreadCounts}
       />
       {chat.activeConvId ? (
         <ChatView
           convId={chat.activeConvId} conversations={chat.conversations}
           messages={chat.messages} loading={chat.loadingMsg}
           currentUserKey={accessKey || ''} allProfiles={chat.allProfiles} myProfile={chat.myProfile}
+          onlineAccessKeys={chat.onlineUsers.map(u => u.accessKey)}
           onSendMessage={chat.sendMessage} onAddMembers={chat.addMembers}
-          onUploadFile={chat.uploadFile} onSendCloudFile={chat.sendCloudFile}
+          onUploadFile={chat.uploadFile}
           onCaptureScreenshot={chat.captureScreenshot} onDownloadFile={chat.downloadFile}
+          shares={chat.shares} onShareFile={(path, days) => chat.shareVfsFile(chat.activeConvId!, path, days)}
+          onToast={chat.showToast}
         />
       ) : (
         <div className="chat-placeholder">
-          <svg viewBox="0 0 64 64" width="64" height="64" fill="none" opacity="0.3">
-            <rect x="8" y="10" width="48" height="36" rx="6" fill="#3b82f6" stroke="#2563eb" strokeWidth="1.5" />
-            <circle cx="22" cy="28" r="4" fill="#eff6ff" />
-            <circle cx="42" cy="28" r="4" fill="#eff6ff" />
-            <path d="M22 38c0-4 4.5-6 10-6s10 2 10 6" stroke="#eff6ff" strokeWidth="2.5" strokeLinecap="round" fill="none" />
-          </svg>
+          <div style={{ width: 64, height: 64, opacity: 0.4 }}>{iconSvgs.chat}</div>
           <p>选择用户开始聊天</p>
         </div>
       )}

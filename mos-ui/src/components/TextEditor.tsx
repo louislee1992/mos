@@ -80,12 +80,17 @@ const TextEditor: FC<TextEditorProps> = ({ filePath, fileName, onDirtyChange, on
   }, [filePath, setDirty]);
 
   useEffect(() => {
+    console.log('[TextEditor] mount — filePath:', filePath);
     const loadContent = async () => {
       try {
         const { content: text } = await readText(filePath);
+        console.log('[TextEditor] content loaded — length:', text.length, 'editorRef:', !!editorRef.current);
         setLoading(false);
 
-        if (!editorRef.current) return;
+        if (!editorRef.current) {
+          console.error('[TextEditor] editorRef.current is null after load');
+          return;
+        }
 
         const updateListener = EditorView.updateListener.of((update) => {
           if (update.docChanged) {
@@ -108,7 +113,7 @@ const TextEditor: FC<TextEditorProps> = ({ filePath, fileName, onDirtyChange, on
             closeBrackets(),
             history(),
             syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-            oneDark,
+            ...(document.documentElement.dataset.theme !== 'light' ? [oneDark] : []),
             keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
             saveKeymap,
             getLanguageExtension(fileName),
@@ -119,7 +124,9 @@ const TextEditor: FC<TextEditorProps> = ({ filePath, fileName, onDirtyChange, on
 
         const view = new EditorView({ state, parent: editorRef.current });
         viewRef.current = view;
+        console.log('[TextEditor] CodeMirror created — contentEditable:', view.contentDOM.isContentEditable);
       } catch (e) {
+        console.error('[TextEditor] init error:', e);
         setError(String(e));
         setLoading(false);
       }
@@ -127,42 +134,33 @@ const TextEditor: FC<TextEditorProps> = ({ filePath, fileName, onDirtyChange, on
     loadContent();
 
     return () => {
+      console.log('[TextEditor] unmount');
       viewRef.current?.destroy();
       viewRef.current = null;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (loading) {
-    return (
-      <div className="text-editor-container">
+  return (
+    <div className="text-editor-container">
+      <div ref={editorRef} className="text-editor-cm" />
+      {loading ? (
         <div className="text-editor-statusbar">加载中...</div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="text-editor-container">
+      ) : error ? (
         <div className="text-editor-error">
           <p>加载文件失败</p>
           <p className="text-editor-error-detail">{error}</p>
           <button onClick={onCloseRequest} className="text-editor-error-btn">关闭</button>
         </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="text-editor-container">
-      <div ref={editorRef} className="text-editor-cm" />
-      <div className="text-editor-statusbar">
-        <span className="text-editor-filepath">{filePath}</span>
-        <span className="text-editor-save-status">
-          {saveStatus === 'saving' && '保存中...'}
-          {saveStatus === 'saved' && '已保存'}
-          {saveStatus === 'failed' && '保存失败'}
-        </span>
-      </div>
+      ) : (
+        <div className="text-editor-statusbar">
+          <span className="text-editor-filepath">{filePath}</span>
+          <span className="text-editor-save-status">
+            {saveStatus === 'saving' && '保存中...'}
+            {saveStatus === 'saved' && '已保存'}
+            {saveStatus === 'failed' && '保存失败'}
+          </span>
+        </div>
+      )}
     </div>
   );
 };

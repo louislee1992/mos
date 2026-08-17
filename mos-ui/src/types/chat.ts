@@ -3,7 +3,7 @@ export interface ChatMessage {
   convId: string;
   sender: string;
   senderName: string;
-  type: 'text' | 'image' | 'file' | 'emoji' | 'system';
+  type: 'text' | 'image' | 'file' | 'emoji' | 'system' | 'share';
   content: string;
   fileName?: string;
   fileSize: number;
@@ -18,6 +18,7 @@ export interface ConversationMeta {
   createdAt: number;
   lastMessage?: string;
   lastMessageTime: number;
+  unreadCount?: number;
 }
 
 export interface UserProfile {

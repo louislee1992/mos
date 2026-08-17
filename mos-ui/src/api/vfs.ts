@@ -13,8 +13,12 @@ export function createFile(path: string) {
   return apiPost('/api/vfs/file', { path });
 }
 
-export function uploadFile(file: File, path: string) {
-  return apiUpload('/api/vfs/upload', file, { path });
+export function createWordDoc(path: string) {
+  return apiPost('/api/vfs/word', { path });
+}
+
+export function uploadFile(file: File, path: string, onProgress?: (loaded: number, total: number) => void, onUploaded?: () => void) {
+  return apiUpload('/api/vfs/upload', file, { path }, onProgress, onUploaded);
 }
 
 export function readText(path: string) {

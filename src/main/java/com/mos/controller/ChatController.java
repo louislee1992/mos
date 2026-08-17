@@ -10,6 +10,7 @@ import com.mos.service.OnlineUserService;
 import io.minio.MinioClient;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -27,10 +28,12 @@ import org.springframework.web.multipart.MultipartFile;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/chat")
 @RequiredArgsConstructor
@@ -53,34 +56,43 @@ public class ChatController {
         return (String) req.getAttribute("accessKey");
     }
 
+    private static String maskKey(String key) {
+        if (key == null || key.length() <= 6) return key;
+        return key.substring(0, 4) + "***" + key.substring(key.length() - 2);
+    }
+
     // ── Profiles ──
 
     @GetMapping("/profiles")
     public ResponseEntity<?> listProfiles(HttpServletRequest req) {
         try {
-            return ResponseEntity.ok(chatService.listProfiles(getClient(req), getBucket(req)));
+            return ResponseEntity.ok(chatService.listProfiles());
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat profiles list FAIL: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
     @GetMapping("/profiles/me")
     public ResponseEntity<?> myProfile(HttpServletRequest req) {
         try {
-            return ResponseEntity.ok(chatService.loadMyProfile(getClient(req), getBucket(req), getAccessKey(req)));
+            return ResponseEntity.ok(chatService.loadMyProfile(getAccessKey(req)));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat my profile FAIL: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
     @PutMapping("/profiles/me")
     public ResponseEntity<?> updateMyProfile(@RequestBody Map<String, String> body, HttpServletRequest req) {
         try {
-            chatService.saveMyProfile(getClient(req), getBucket(req), getAccessKey(req),
-                    body.get("nickname"), body.get("avatar"));
-            return ResponseEntity.ok(Map.of("ok", true));
+            chatService.saveMyProfile(getAccessKey(req), body.get("nickname"), body.get("avatar"));
+            messagingTemplate.convertAndSend("/topic/online",
+                    Collections.singletonMap("type", "profile_update"));
+            return ResponseEntity.ok(Collections.singletonMap("ok", true));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat update my profile FAIL: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
@@ -93,8 +105,9 @@ public class ChatController {
             List<UserProfile> users = new ArrayList<>();
             for (String key : keys) {
                 try {
-                    users.add(chatService.loadMyProfile(getClient(req), getBucket(req), key));
+                    users.add(chatService.loadMyProfile(key));
                 } catch (Exception e) {
+                    log.error("Chat load profile for online user {} FAIL: {}", key, e.getMessage());
                     UserProfile p = new UserProfile();
                     p.setAccessKey(key);
                     p.setNickname(key);
@@ -103,7 +116,8 @@ public class ChatController {
             }
             return ResponseEntity.ok(users);
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat online users list FAIL: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
@@ -112,24 +126,26 @@ public class ChatController {
     @GetMapping("/conversations")
     public ResponseEntity<?> listConversations(HttpServletRequest req) {
         try {
-            return ResponseEntity.ok(
-                    chatService.listConversations(getClient(req), getBucket(req), getAccessKey(req)));
+            log.info("Chat conversations — accessKey={}", maskKey(getAccessKey(req)));
+            return ResponseEntity.ok(chatService.listConversations(getAccessKey(req)));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat conversations list FAIL: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
     @PostMapping("/conversations")
     public ResponseEntity<?> getOrCreateConversation(@RequestBody Map<String, String> body, HttpServletRequest req) {
         try {
+            log.info("Chat conv get/create — otherUser={} accessKey={}", body.get("otherUser"), maskKey(getAccessKey(req)));
             String otherUser = body.get("otherUser");
-            if (otherUser == null || otherUser.isBlank()) {
-                return ResponseEntity.badRequest().body(Map.of("error", "otherUser is required"));
+            if (otherUser == null || otherUser.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(Collections.singletonMap("error", "otherUser is required"));
             }
-            return ResponseEntity.ok(chatService.getOrCreatePrivateConv(
-                    getClient(req), getBucket(req), getAccessKey(req), otherUser));
+            return ResponseEntity.ok(chatService.getOrCreatePrivateConv(getAccessKey(req), otherUser));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat conversation get/create FAIL — otherUser={}: {}", body.get("otherUser"), e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
@@ -138,9 +154,21 @@ public class ChatController {
     @GetMapping("/conversations/{id}/messages")
     public ResponseEntity<?> loadMessages(@PathVariable String id, HttpServletRequest req) {
         try {
-            return ResponseEntity.ok(chatService.loadMessages(getClient(req), getBucket(req), id, getAccessKey(req)));
+            return ResponseEntity.ok(chatService.loadMessages(id, getAccessKey(req)));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat messages load FAIL — convId={}: {}", id, e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/conversations/{id}/read")
+    public ResponseEntity<?> markConversationRead(@PathVariable String id, HttpServletRequest req) {
+        try {
+            chatService.markConversationRead(id, getAccessKey(req));
+            return ResponseEntity.ok(Collections.singletonMap("ok", true));
+        } catch (Exception e) {
+            log.error("Chat mark read FAIL — convId={}: {}", id, e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
@@ -148,32 +176,24 @@ public class ChatController {
     public ResponseEntity<?> sendMessage(@PathVariable String id, @RequestBody Map<String, String> body,
                                           HttpServletRequest req) {
         try {
-            MinioClient client = getClient(req);
-            String bucket = getBucket(req);
+            log.info("Chat send — convId={} msgType={} accessKey={}", id, body.getOrDefault("msgType", "text"), maskKey(getAccessKey(req)));
             String sender = getAccessKey(req);
-            ChatMessage msg = chatService.sendMessage(client, bucket, id, sender,
+            ChatMessage msg = chatService.sendMessage(id, sender,
                     body.get("content"), body.getOrDefault("msgType", "text"),
                     body.get("fileName"),
-                    body.containsKey("fileSize") ? Long.parseLong(body.get("fileSize")) : null,
-                    getAccessKey(req));
+                    body.containsKey("fileSize") ? Long.parseLong(body.get("fileSize")) : null);
 
             // Push via WebSocket to conversation members
-            String membersKey = ChatService.PREFIX + "/conversations/" + id + "_members.json";
-            try {
-                ConversationMeta meta = minioService.readJson(client, bucket, membersKey, ConversationMeta.class);
-                if (meta != null && meta.getMembers() != null) {
-                    for (String member : meta.getMembers()) {
-                        if (!member.equals(sender)) {
-                            messagingTemplate.convertAndSendToUser(member, "/queue/chat", msg);
-                        }
-                    }
+            for (String member : chatService.getConversationMembers(id)) {
+                if (!member.equals(sender)) {
+                    messagingTemplate.convertAndSendToUser(member, "/queue/chat", msg);
                 }
-            } catch (Exception ignored) {
             }
 
             return ResponseEntity.ok(msg);
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat send FAIL — convId={}: {}", id, e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
@@ -185,12 +205,21 @@ public class ChatController {
             @SuppressWarnings("unchecked")
             List<String> memberKeys = (List<String>) body.get("memberKeys");
             if (memberKeys == null) {
-                return ResponseEntity.badRequest().body(Map.of("error", "memberKeys is required"));
+                return ResponseEntity.badRequest().body(Collections.singletonMap("error", "memberKeys is required"));
             }
-            return ResponseEntity.ok(chatService.createGroup(getClient(req), getBucket(req),
-                    getAccessKey(req), (String) body.get("name"), memberKeys));
+            String creator = getAccessKey(req);
+            ConversationMeta meta = chatService.createGroup(creator, (String) body.get("name"), memberKeys);
+            ChatMessage sysMsg = chatService.sendSystemMessage(meta.getId(), creator,
+                    chatService.loadMyProfile(creator).getNickname() + " 创建了群聊");
+            for (String member : meta.getMembers()) {
+                if (!member.equals(creator)) {
+                    messagingTemplate.convertAndSendToUser(member, "/queue/chat", sysMsg);
+                }
+            }
+            return ResponseEntity.ok(meta);
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat group create FAIL: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
@@ -201,12 +230,21 @@ public class ChatController {
             @SuppressWarnings("unchecked")
             List<String> memberKeys = (List<String>) body.get("memberKeys");
             if (memberKeys == null) {
-                return ResponseEntity.badRequest().body(Map.of("error", "memberKeys is required"));
+                return ResponseEntity.badRequest().body(Collections.singletonMap("error", "memberKeys is required"));
             }
-            chatService.addGroupMembers(getClient(req), getBucket(req), id, memberKeys);
-            return ResponseEntity.ok(Map.of("ok", true));
+            chatService.addGroupMembers(id, memberKeys);
+            String operator = getAccessKey(req);
+            ChatMessage sysMsg = chatService.sendSystemMessage(id, operator,
+                    chatService.loadMyProfile(operator).getNickname() + " 邀请新成员加入群聊");
+            for (String member : chatService.getConversationMembers(id)) {
+                if (!member.equals(operator)) {
+                    messagingTemplate.convertAndSendToUser(member, "/queue/chat", sysMsg);
+                }
+            }
+            return ResponseEntity.ok(Collections.singletonMap("ok", true));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat group add members FAIL — convId={}: {}", id, e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
@@ -217,29 +255,33 @@ public class ChatController {
                                         @RequestParam("convId") String convId,
                                         HttpServletRequest req) {
         try {
-            String s3Key = chatService.uploadChatFile(getClient(req), getBucket(req), convId,
-                    file.getOriginalFilename(), file.getBytes());
-            return ResponseEntity.ok(Map.of("s3Key", s3Key));
+            log.info("Chat upload — convId={} file={} accessKey={}", convId, file.getOriginalFilename(), maskKey(getAccessKey(req)));
+            String path = chatService.uploadChatFile(convId, file.getOriginalFilename(), file.getBytes());
+            return ResponseEntity.ok(Collections.singletonMap("s3Key", path));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat file upload FAIL — convId={} file={}: {}", convId, file.getOriginalFilename(), e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
     @PostMapping("/cloud-file")
     public ResponseEntity<?> sendCloudFile(@RequestBody Map<String, String> body, HttpServletRequest req) {
         try {
-            String s3Key = chatService.sendCloudFile(getClient(req), getBucket(req),
+            log.info("Chat cloud-file — convId={} vfsPath={} accessKey={}", body.get("convId"), body.get("vfsPath"), maskKey(getAccessKey(req)));
+            String path = chatService.sendCloudFile(getClient(req), getBucket(req),
                     body.get("convId"), body.get("vfsPath"), body.get("fileName"));
-            return ResponseEntity.ok(Map.of("s3Key", s3Key));
+            return ResponseEntity.ok(Collections.singletonMap("s3Key", path));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat cloud file send FAIL — convId={}: {}", body.get("convId"), e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
     @GetMapping("/download")
     public ResponseEntity<?> downloadFile(@RequestParam String s3Key, HttpServletRequest req) {
         try {
-            byte[] data = chatService.downloadChatFile(getClient(req), getBucket(req), s3Key);
+            log.info("Chat download — path={} accessKey={}", s3Key, maskKey(getAccessKey(req)));
+            byte[] data = chatService.downloadChatFile(s3Key);
             String filename = s3Key.contains("_") ? s3Key.substring(s3Key.lastIndexOf('_') + 1) : "file";
             return ResponseEntity.ok()
                     .header(HttpHeaders.CONTENT_DISPOSITION,
@@ -247,7 +289,21 @@ public class ChatController {
                     .contentType(MediaType.APPLICATION_OCTET_STREAM)
                     .body(data);
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat file download FAIL — path={}: {}", s3Key, e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/save-to-vfs")
+    public ResponseEntity<?> saveToVfs(@RequestBody Map<String, String> body, HttpServletRequest req) {
+        try {
+            log.info("Chat save-to-vfs — path={} accessKey={}", body.get("s3Key"), maskKey(getAccessKey(req)));
+            chatService.saveChatFileToVfs(getClient(req), getBucket(req),
+                    body.get("s3Key"), body.get("destPath"));
+            return ResponseEntity.ok(Collections.singletonMap("ok", true));
+        } catch (Exception e) {
+            log.error("Chat save-to-vfs FAIL — path={}: {}", body.get("s3Key"), e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 
@@ -258,9 +314,10 @@ public class ChatController {
         try {
             Object config = minioService.readJsonOrDefault(getClient(req), getBucket(req),
                     "mos-chat/redis-config.json", Object.class, null);
-            return ResponseEntity.ok(config != null ? config : Map.of());
+            return ResponseEntity.ok(config != null ? config : Collections.emptyMap());
         } catch (Exception e) {
-            return ResponseEntity.ok(Map.of());
+            log.error("Chat saved server read FAIL: {}", e.getMessage());
+            return ResponseEntity.ok(Collections.emptyMap());
         }
     }
 
@@ -268,9 +325,10 @@ public class ChatController {
     public ResponseEntity<?> saveServer(@RequestBody Object config, HttpServletRequest req) {
         try {
             minioService.writeJson(getClient(req), getBucket(req), "mos-chat/redis-config.json", config);
-            return ResponseEntity.ok(Map.of("ok", true));
+            return ResponseEntity.ok(Collections.singletonMap("ok", true));
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(Map.of("error", e.getMessage()));
+            log.error("Chat saved server save FAIL: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body(Collections.singletonMap("error", e.getMessage()));
         }
     }
 }

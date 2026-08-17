@@ -5,86 +5,110 @@ import com.mos.model.ChatMessage;
 import com.mos.model.ConversationMeta;
 import com.mos.model.UserProfile;
 import io.minio.MinioClient;
-import io.minio.Result;
-import io.minio.messages.Item;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
-import java.io.ByteArrayInputStream;
-import java.net.URLConnection;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
 public class ChatService {
 
+    private final LocalChatStore store;
     private final MinioService minioService;
+
     public static final String PREFIX = "mos-chat";
+
+    private static String membersKey(String convId) {
+        return PREFIX + "/conversations/" + convId + "_members.json";
+    }
+
+    private static String messagesKey(String convId) {
+        return PREFIX + "/conversations/" + convId + ".json";
+    }
 
     // ── Profiles ──
 
-    public List<UserProfile> listProfiles(MinioClient client, String bucket) throws Exception {
+    public List<UserProfile> listProfiles() throws Exception {
         List<UserProfile> profiles = new ArrayList<>();
-        for (Result<Item> result : minioService.listObjects(client, bucket, PREFIX + "/profiles/")) {
-            Item item = result.get();
-            String key = item.objectName();
-            if (key == null || !key.endsWith(".json")) continue;
-            try {
-                UserProfile p = minioService.readJson(client, bucket, key, UserProfile.class);
-                if (p != null) profiles.add(p);
-            } catch (Exception ignored) {
-            }
+        for (String name : store.listFiles(PREFIX + "/profiles")) {
+            if (!name.endsWith(".json")) continue;
+            UserProfile p = store.readJson(PREFIX + "/profiles/" + name, UserProfile.class, null);
+            if (p != null) profiles.add(p);
         }
         return profiles;
     }
 
-    public UserProfile loadMyProfile(MinioClient client, String bucket, String accessKey) throws Exception {
-        String key = PREFIX + "/profiles/" + accessKey + ".json";
-        return minioService.readJsonOrDefault(client, bucket, key, UserProfile.class,
-                createDefaultProfile(accessKey));
+    public UserProfile loadMyProfile(String accessKey) throws Exception {
+        return store.readJson(PREFIX + "/profiles/" + accessKey + ".json",
+                UserProfile.class, createDefaultProfile(accessKey));
     }
 
-    public void saveMyProfile(MinioClient client, String bucket, String accessKey,
-                              String nickname, String avatar) throws Exception {
-        String key = PREFIX + "/profiles/" + accessKey + ".json";
-        long createdAt = System.currentTimeMillis();
-        try {
-            UserProfile existing = minioService.readJson(client, bucket, key, UserProfile.class);
-            if (existing != null && existing.getCreatedAt() > 0) {
-                createdAt = existing.getCreatedAt();
-            }
-        } catch (Exception ignored) {
-        }
+    public synchronized void saveMyProfile(String accessKey, String nickname, String avatar) throws Exception {
+        UserProfile existing = store.readJson(PREFIX + "/profiles/" + accessKey + ".json",
+                UserProfile.class, null);
+        long createdAt = existing != null && existing.getCreatedAt() > 0
+                ? existing.getCreatedAt() : System.currentTimeMillis();
         UserProfile profile = new UserProfile();
         profile.setAccessKey(accessKey);
-        profile.setNickname(nickname != null ? nickname : accessKey);
-        profile.setAvatar(avatar != null ? avatar : "");
+        profile.setNickname(nickname != null ? nickname
+                : (existing != null && existing.getNickname() != null && !existing.getNickname().isEmpty()
+                        ? existing.getNickname() : accessKey));
+        profile.setAvatar(avatar != null ? avatar
+                : (existing != null && existing.getAvatar() != null ? existing.getAvatar() : ""));
         profile.setCreatedAt(createdAt);
-        minioService.writeJson(client, bucket, key, profile);
+        store.writeJson(PREFIX + "/profiles/" + accessKey + ".json", profile);
     }
 
     // ── Conversations ──
 
-    public List<ConversationMeta> listConversations(MinioClient client, String bucket, String accessKey) throws Exception {
+    public List<ConversationMeta> listConversations(String accessKey) throws Exception {
         List<ConversationMeta> convs = new ArrayList<>();
-        for (Result<Item> result : minioService.listObjects(client, bucket, PREFIX + "/conversations/")) {
-            Item item = result.get();
-            String key = item.objectName();
-            if (key == null || !key.endsWith("_members.json")) continue;
-            try {
-                ConversationMeta meta = minioService.readJson(client, bucket, key, ConversationMeta.class);
-                if (meta.getMembers() != null && meta.getMembers().contains(accessKey)) {
-                    convs.add(meta);
-                }
-            } catch (Exception ignored) {
+        for (String name : store.listFiles(PREFIX + "/conversations")) {
+            if (!name.endsWith("_members.json")) continue;
+            ConversationMeta meta = store.readJson(PREFIX + "/conversations/" + name,
+                    ConversationMeta.class, null);
+            if (meta != null && meta.getMembers() != null && meta.getMembers().contains(accessKey)) {
+                refreshFromMessages(meta, accessKey);
+                convs.add(meta);
             }
         }
         convs.sort((a, b) -> Long.compare(b.getLastMessageTime(), a.getLastMessageTime()));
         return convs;
+    }
+
+    private void refreshFromMessages(ConversationMeta meta, String accessKey) throws Exception {
+        List<ChatMessage> msgs = store.readJson(messagesKey(meta.getId()),
+                new TypeReference<List<ChatMessage>>() {
+                }, Collections.emptyList());
+        long unread = 0;
+        if (!msgs.isEmpty()) {
+            ChatMessage last = msgs.get(msgs.size() - 1);
+            meta.setLastMessage(computeLastMessagePreview(last.getMsgType(), last.getContent(), last.getFileName()));
+            meta.setLastMessageTime(last.getTimestamp());
+            long readAt = meta.getReadTimes() != null && meta.getReadTimes().get(accessKey) != null
+                    ? meta.getReadTimes().get(accessKey) : 0L;
+            for (ChatMessage m : msgs) {
+                if (m.getTimestamp() > readAt && !m.getSender().equals(accessKey)) unread++;
+            }
+        }
+        meta.setUnreadCount(unread);
+    }
+
+    public synchronized void markConversationRead(String convId, String accessKey) throws Exception {
+        ConversationMeta meta = store.readJson(membersKey(convId), ConversationMeta.class, null);
+        if (meta == null || meta.getMembers() == null || !meta.getMembers().contains(accessKey)) {
+            throw new SecurityException("User is not a member of this conversation");
+        }
+        if (meta.getReadTimes() == null) meta.setReadTimes(new HashMap<>());
+        meta.getReadTimes().put(accessKey, System.currentTimeMillis());
+        store.writeJson(membersKey(convId), meta);
     }
 
     private String makePrivateConvId(String a, String b) {
@@ -93,28 +117,27 @@ public class ChatService {
         return "conv_" + keys.get(0) + "_" + keys.get(1);
     }
 
-    public ConversationMeta getOrCreatePrivateConv(MinioClient client, String bucket,
-                                                    String currentUser, String otherUser) throws Exception {
+    public synchronized ConversationMeta getOrCreatePrivateConv(String currentUser, String otherUser) throws Exception {
         String convId = makePrivateConvId(currentUser, otherUser);
-        String membersKey = PREFIX + "/conversations/" + convId + "_members.json";
-        try {
-            return minioService.readJson(client, bucket, membersKey, ConversationMeta.class);
-        } catch (Exception e) {
-            ConversationMeta meta = new ConversationMeta();
-            meta.setId(convId);
-            meta.setConvType("private");
-            meta.setName("");
-            meta.setMembers(Arrays.asList(currentUser, otherUser));
-            meta.setCreatedAt(System.currentTimeMillis());
-            meta.setLastMessage("");
-            meta.setLastMessageTime(0);
-            minioService.writeJson(client, bucket, membersKey, meta);
+        ConversationMeta meta = store.readJson(membersKey(convId), ConversationMeta.class, null);
+        if (meta != null) {
+            refreshFromMessages(meta, currentUser);
             return meta;
         }
+        meta = new ConversationMeta();
+        meta.setId(convId);
+        meta.setConvType("private");
+        meta.setName("");
+        meta.setMembers(Arrays.asList(currentUser, otherUser));
+        meta.setCreatedAt(System.currentTimeMillis());
+        meta.setLastMessage("");
+        meta.setLastMessageTime(0);
+        store.writeJson(membersKey(convId), meta);
+        return meta;
     }
 
-    public ConversationMeta createGroup(MinioClient client, String bucket, String currentUser,
-                                         String name, List<String> memberKeys) throws Exception {
+    public synchronized ConversationMeta createGroup(String currentUser, String name,
+                                                      List<String> memberKeys) throws Exception {
         List<String> members = new ArrayList<>(memberKeys);
         if (!members.contains(currentUser)) members.add(currentUser);
         String convId = "conv_" + UUID.randomUUID();
@@ -126,48 +149,53 @@ public class ChatService {
         meta.setCreatedAt(System.currentTimeMillis());
         meta.setLastMessage("");
         meta.setLastMessageTime(System.currentTimeMillis());
-        minioService.writeJson(client, bucket, PREFIX + "/conversations/" + convId + "_members.json", meta);
-        minioService.writeJson(client, bucket, PREFIX + "/conversations/" + convId + ".json", new ArrayList<>());
+        Map<String, Long> readTimes = new HashMap<>();
+        long now = System.currentTimeMillis();
+        for (String m : members) readTimes.put(m, now);
+        meta.setReadTimes(readTimes);
+        store.writeJson(membersKey(convId), meta);
+        store.writeJson(messagesKey(convId), new ArrayList<>());
         return meta;
     }
 
-    public void addGroupMembers(MinioClient client, String bucket, String convId,
-                                 List<String> memberKeys) throws Exception {
-        String key = PREFIX + "/conversations/" + convId + "_members.json";
-        ConversationMeta meta = minioService.readJson(client, bucket, key, ConversationMeta.class);
+    public synchronized void addGroupMembers(String convId, List<String> memberKeys) throws Exception {
+        ConversationMeta meta = store.readJson(membersKey(convId), ConversationMeta.class, null);
+        if (meta == null) throw new SecurityException("Conversation not found");
+        if (meta.getReadTimes() == null) meta.setReadTimes(new HashMap<>());
         for (String mk : memberKeys) {
-            if (!meta.getMembers().contains(mk)) meta.getMembers().add(mk);
+            if (!meta.getMembers().contains(mk)) {
+                meta.getMembers().add(mk);
+                meta.getReadTimes().put(mk, System.currentTimeMillis());
+            }
         }
-        minioService.writeJson(client, bucket, key, meta);
+        store.writeJson(membersKey(convId), meta);
+    }
+
+    public List<String> getConversationMembers(String convId) throws Exception {
+        ConversationMeta meta = store.readJson(membersKey(convId), ConversationMeta.class, null);
+        return meta != null && meta.getMembers() != null ? meta.getMembers() : Collections.emptyList();
     }
 
     // ── Messages ──
 
-    public List<ChatMessage> loadMessages(MinioClient client, String bucket, String convId,
-                                          String currentUser) throws Exception {
-        String membersKey = PREFIX + "/conversations/" + convId + "_members.json";
-        ConversationMeta meta = minioService.readJson(client, bucket, membersKey, ConversationMeta.class);
+    public List<ChatMessage> loadMessages(String convId, String currentUser) throws Exception {
+        ConversationMeta meta = store.readJson(membersKey(convId), ConversationMeta.class, null);
         if (meta == null || meta.getMembers() == null || !meta.getMembers().contains(currentUser)) {
             throw new SecurityException("User is not a member of this conversation");
         }
-        String key = PREFIX + "/conversations/" + convId + ".json";
-        return minioService.readJsonOrDefault(client, bucket, key,
+        return store.readJson(messagesKey(convId),
                 new TypeReference<List<ChatMessage>>() {
                 }, new ArrayList<>());
     }
 
-    public ChatMessage sendMessage(MinioClient client, String bucket, String convId,
-                                    String sender, String content, String msgType,
-                                    String fileName, Long fileSize,
-                                    String currentUser) throws Exception {
-        // Verify sender is a member of the conversation
-        String membersKey = PREFIX + "/conversations/" + convId + "_members.json";
-        ConversationMeta meta = minioService.readJson(client, bucket, membersKey, ConversationMeta.class);
-        if (meta == null || meta.getMembers() == null || !meta.getMembers().contains(currentUser)) {
+    public synchronized ChatMessage sendMessage(String convId, String sender, String content,
+                                                String msgType, String fileName, Long fileSize) throws Exception {
+        ConversationMeta meta = store.readJson(membersKey(convId), ConversationMeta.class, null);
+        if (meta == null || meta.getMembers() == null || !meta.getMembers().contains(sender)) {
             throw new SecurityException("User is not a member of this conversation");
         }
 
-        String senderName = loadMyProfile(client, bucket, sender).getNickname();
+        String senderName = loadMyProfile(sender).getNickname();
         ChatMessage msg = new ChatMessage();
         msg.setId(UUID.randomUUID().toString());
         msg.setConvId(convId);
@@ -179,45 +207,86 @@ public class ChatService {
         msg.setFileSize(fileSize != null ? fileSize : 0);
         msg.setTimestamp(System.currentTimeMillis());
 
-        // Append to messages array
-        String msgKey = PREFIX + "/conversations/" + convId + ".json";
-        List<ChatMessage> existing = loadMessages(client, bucket, convId, currentUser);
+        List<ChatMessage> existing = loadMessages(convId, sender);
         existing.add(msg);
-        minioService.writeJson(client, bucket, msgKey, existing);
+        store.writeJson(messagesKey(convId), existing);
 
-        // Update conversation meta
-        try {
-            meta.setLastMessage(computeLastMessagePreview(msgType, content, fileName));
-            meta.setLastMessageTime(msg.getTimestamp());
-            minioService.writeJson(client, bucket, membersKey, meta);
-        } catch (Exception ignored) {
-        }
+        meta.setLastMessage(computeLastMessagePreview(msgType, content, fileName));
+        meta.setLastMessageTime(msg.getTimestamp());
+        store.writeJson(membersKey(convId), meta);
+
+        return msg;
+    }
+
+    public synchronized ChatMessage sendSystemMessage(String convId, String sender, String content) throws Exception {
+        ConversationMeta meta = store.readJson(membersKey(convId), ConversationMeta.class, null);
+        if (meta == null) throw new SecurityException("Conversation not found");
+
+        ChatMessage msg = new ChatMessage();
+        msg.setId(UUID.randomUUID().toString());
+        msg.setConvId(convId);
+        msg.setSender(sender);
+        msg.setSenderName(loadMyProfile(sender).getNickname());
+        msg.setMsgType("system");
+        msg.setContent(content != null ? content : "");
+        msg.setFileName("");
+        msg.setFileSize(0);
+        msg.setTimestamp(System.currentTimeMillis());
+
+        List<ChatMessage> existing = store.readJson(messagesKey(convId),
+                new TypeReference<List<ChatMessage>>() {
+                }, new ArrayList<>());
+        existing.add(msg);
+        store.writeJson(messagesKey(convId), existing);
+
+        meta.setLastMessage(content != null ? content : "");
+        meta.setLastMessageTime(msg.getTimestamp());
+        store.writeJson(membersKey(convId), meta);
 
         return msg;
     }
 
     // ── Files ──
 
-    public String uploadChatFile(MinioClient client, String bucket, String convId,
-                                  String fileName, byte[] data) throws Exception {
-        String msgId = UUID.randomUUID().toString();
-        String s3Key = PREFIX + "/files/" + convId + "/" + msgId + "_" + fileName;
-        minioService.uploadFile(client, bucket, s3Key,
-                new ByteArrayInputStream(data), data.length,
-                URLConnection.guessContentTypeFromName(fileName));
-        return s3Key;
+    public synchronized String uploadChatFile(String convId, String fileName, byte[] data) throws Exception {
+        String relative = PREFIX + "/files/" + convId + "/" + UUID.randomUUID() + "_" + fileName;
+        store.writeFile(relative, data);
+        return relative;
     }
 
-    public String sendCloudFile(MinioClient client, String bucket, String convId,
-                                 String vfsPath, String fileName) throws Exception {
-        String msgId = UUID.randomUUID().toString();
-        String s3Key = PREFIX + "/files/" + convId + "/" + msgId + "_" + fileName;
-        minioService.copyObject(client, bucket, "vfs/" + vfsPath.replaceAll("^/", ""), s3Key);
-        return s3Key;
+    public synchronized String sendCloudFile(MinioClient client, String bucket, String convId,
+                                             String vfsPath, String fileName) throws Exception {
+        byte[] data = minioService.downloadFile(client, bucket, "vfs/" + vfsPath.replaceAll("^/", ""));
+        return uploadChatFile(convId, fileName, data);
     }
 
-    public byte[] downloadChatFile(MinioClient client, String bucket, String s3Key) throws Exception {
-        return minioService.downloadFile(client, bucket, s3Key);
+    public byte[] downloadChatFile(String relative) throws Exception {
+        return store.readFile(relative);
+    }
+
+    public synchronized void saveChatFileToVfs(MinioClient client, String bucket, String s3Key,
+                                               String destPath) throws Exception {
+        if (s3Key == null || !s3Key.startsWith(PREFIX + "/files/")) {
+            throw new SecurityException("Invalid chat file path");
+        }
+        String fileName = s3Key.substring(s3Key.lastIndexOf('/') + 1);
+        int underscore = fileName.indexOf('_');
+        if (underscore >= 0) fileName = fileName.substring(underscore + 1);
+        byte[] data = store.readFile(s3Key);
+
+        String destKey = "vfs/" + destPath.replaceAll("^/", "");
+        if (!destKey.endsWith("/")) destKey += "/";
+        destKey += fileName;
+        try {
+            minioService.statSize(client, bucket, destKey);
+            throw new IllegalStateException("Target file already exists");
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (Exception ignored) {
+            // target does not exist, proceed
+        }
+        minioService.uploadFile(client, bucket, destKey,
+                new java.io.ByteArrayInputStream(data), data.length, "application/octet-stream");
     }
 
     // ── Helpers ──
@@ -233,11 +302,17 @@ public class ChatService {
 
     private String computeLastMessagePreview(String msgType, String content, String fileName) {
         if (msgType == null) return content != null ? content : "";
-        return switch (msgType) {
-            case "image" -> "[图片]";
-            case "file" -> "[文件] " + (fileName != null ? fileName : "");
-            case "emoji" -> content != null ? content : "";
-            default -> content != null ? content : "";
-        };
+        switch (msgType) {
+            case "image":
+                return "[图片]";
+            case "file":
+                return "[文件] " + (fileName != null ? fileName : "");
+            case "share":
+                return "[分享] " + (fileName != null ? fileName : "");
+            case "emoji":
+                return content != null ? content : "";
+            default:
+                return content != null ? content : "";
+        }
     }
 }

@@ -13,6 +13,14 @@ export interface DeviceInfo {
   localIp: string;
 }
 
+export interface LoginHistoryEntry {
+  loginTime: number;
+  ipAddress: string;
+  hostname: string;
+  osName: string;
+  osVersion: string;
+}
+
 export interface CustomWallpaper {
   id: string;       // uuid
   name: string;     // original filename

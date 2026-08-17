@@ -1,7 +1,9 @@
-import React, { type FC, useState, useEffect, useCallback, useRef } from 'react';
-import { listVfs, createFolder, createFile, moveToTrash, uploadFile } from '../api/vfs';
+import React, { type FC, useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { listVfs, createFolder, createFile, createWordDoc, moveToTrash, deleteVfs, uploadFile, copyVfs, renameVfs } from '../api/vfs';
 import { downloadVfsFile } from '../api/client';
+import { listFavorites, addFavorite, removeFavorite, listVfsHistory, recordVfsHistory, removeVfsHistory, type FavoriteEntry, type VfsHistoryEntry } from '../api/settings';
 import type { VfsEntry } from '../types/vfs';
+import SharesPanel from './SharesPanel';
 
 interface DirNode {
   name: string;
@@ -127,6 +129,17 @@ function isEditableFile(name: string): boolean {
   return EDITABLE_EXTS.has(name.slice(dot + 1).toLowerCase());
 }
 
+function getBaseName(path: string): string {
+  const p = path.endsWith('/') ? path.slice(0, -1) : path;
+  const idx = p.lastIndexOf('/');
+  return idx >= 0 ? p.slice(idx + 1) : p;
+}
+
+function getExt(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1) : '';
+}
+
 // ── icons ──
 
 const IconFolder = () => (
@@ -215,16 +228,29 @@ interface CtxMenu {
   visible: boolean;
 }
 
+interface FileCtxMenu {
+  x: number;
+  y: number;
+  visible: boolean;
+  path: string;
+  isDirectory: boolean;
+}
+
+interface RubberBand {
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+}
+
 // ── tree builder ──
 
 function entriesToTree(entries: VfsEntry[]): DirNode[] {
   const nodeMap = new Map<string, DirNode>();
 
-  // Build complete path hierarchy
   for (const entry of entries) {
     const parts = entry.path.split('/');
 
-    // Ensure all intermediate folder paths exist
     let currentPath = '';
     for (let i = 0; i < parts.length; i++) {
       currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
@@ -240,7 +266,6 @@ function entriesToTree(entries: VfsEntry[]): DirNode[] {
     }
   }
 
-  // Populate file entries and update folder metadata
   for (const entry of entries) {
     const node = nodeMap.get(entry.path);
     if (node) {
@@ -251,7 +276,6 @@ function entriesToTree(entries: VfsEntry[]): DirNode[] {
     }
   }
 
-  // Build tree: add each node to its parent
   const root: DirNode[] = [];
   for (const [path, node] of nodeMap) {
     const lastSlash = path.lastIndexOf('/');
@@ -271,33 +295,90 @@ function entriesToTree(entries: VfsEntry[]): DirNode[] {
   return root;
 }
 
+// ── flat list for shift-range ordering ──
+
+function flattenVisible(
+  nodes: DirNode[],
+  parentPath: string,
+  expandedDirs: Set<string>,
+  sortBy: SortKey,
+  sortAsc: boolean,
+  searchQuery: string,
+): { path: string; node: DirNode }[] {
+  const sorted = [...nodes].sort((a, b) => {
+    const dirCmp = b.isDirectory === a.isDirectory ? 0 : b.isDirectory ? 1 : -1;
+    if (dirCmp !== 0) return dirCmp;
+    let cmp = 0;
+    switch (sortBy) {
+      case 'name': cmp = a.name.localeCompare(b.name); break;
+      case 'time': cmp = a.modifiedAt.localeCompare(b.modifiedAt); break;
+      case 'type': cmp = getFileType(a.name, a.isDirectory).localeCompare(getFileType(b.name, b.isDirectory)); break;
+      case 'size': cmp = a.size - b.size; break;
+    }
+    return sortAsc ? cmp : -cmp;
+  });
+
+  const result: { path: string; node: DirNode }[] = [];
+  for (const node of sorted) {
+    if (searchQuery && !node.name.toLowerCase().includes(searchQuery.toLowerCase())) continue;
+    const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
+    result.push({ path: fullPath, node });
+    if (node.isDirectory && expandedDirs.has(fullPath) && node.children.length > 0) {
+      result.push(...flattenVisible(node.children, fullPath, expandedDirs, sortBy, sortAsc, searchQuery));
+    }
+  }
+  return result;
+}
+
 // ── FileManager ──
 
 const FileManager: FC<{
   onOpenApp?: (appId: string) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
-  onOpenFileManagerAt?: (initialPath: string[]) => void;
+  onOpenFileManagerAt?: (initialPath: string[], initialSelectName?: string) => void;
   initialPath?: string[];
+  initialSelectName?: string;
   onAddUploadTask?: (fileName: string, vfsPath: string, totalBytes: number) => string;
-  onAddDownloadTask?: (vfsPath: string, fileName: string, sizeBytes: number) => string;
-  onAddMoveTask?: (fromVfsPath: string, fileName: string, sizeBytes: number) => string;
-}> = ({ onOpenApp, onOpenFile, onOpenFileManagerAt: _onOpenFileManagerAt, initialPath: _initialPath, onAddUploadTask: _onAddUploadTask, onAddDownloadTask: _onAddDownloadTask, onAddMoveTask: _onAddMoveTask }) => {
+  onCompleteTask?: (id: string, transferredBytes?: number) => void;
+  onFailTask?: (id: string, error: string) => void;
+  onUpdateTask?: (id: string, transferredBytes: number) => void;
+  onSetTaskWriting?: (id: string) => void;
+  onAddDownloadTask?: (fileName: string, vfsPath: string, totalBytes: number) => string;
+  onAddMoveTask?: (fileName: string, vfsPath: string, totalBytes: number, sourcePath?: string, destPath?: string) => string;
+  onDragEnter?: () => void;
+}> = ({ onOpenApp, onOpenFile, onOpenFileManagerAt, initialPath, initialSelectName, onAddUploadTask, onCompleteTask, onFailTask, onUpdateTask, onSetTaskWriting, onAddDownloadTask, onAddMoveTask, onDragEnter }) => {
   const [activeNav, setActiveNav] = useState<NavKey>('my-files');
   const [selectedPath, setSelectedPath] = useState<string[]>(['我的文件']);
   const [searchQuery, setSearchQuery] = useState('');
   const [vfsTree, setVfsTree] = useState<DirNode[]>([{ name: '我的文件', isDirectory: true, size: 0, modifiedAt: '', children: [] }]);
-  const [ctxMenu, setCtxMenu] = useState<CtxMenu>({ x: 0, y: 0, visible: false });
+  const [bgCtxMenu, setBgCtxMenu] = useState<CtxMenu>({ x: 0, y: 0, visible: false });
+  const [fileCtxMenu, setFileCtxMenu] = useState<FileCtxMenu>({ x: 0, y: 0, visible: false, path: '', isDirectory: false });
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set(['我的文件']));
   const [expandedMainDirs, setExpandedMainDirs] = useState<Set<string>>(new Set());
   const contentRef = useRef<HTMLDivElement>(null);
 
+  // New feature state
+  const [rubberBand, setRubberBand] = useState<RubberBand | null>(null);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null);
+  const [contentDragOver, setContentDragOver] = useState(false);
+
+  const lastClickedRef = useRef<string | null>(null);
+  const clipboardRef = useRef<{ paths: string[]; operation: 'copy' } | null>(null);
+  const rubberRef = useRef<RubberBand | null>(null);
+  const rubberActiveRef = useRef(false);
+
   // modal
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [createType, setCreateType] = useState<'folder' | 'file'>('folder');
+  const [singleDelete, setSingleDelete] = useState<{ path: string; name: string; isDirectory: boolean } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [createType, setCreateType] = useState<'folder' | 'file' | 'word'>('folder');
   const [createName, setCreateName] = useState('');
   const [modalError, setModalError] = useState('');
+  const createParentRef = useRef<string | null>(null);
 
   // dropdowns
   const [showMoreMenu, setShowMoreMenu] = useState(false);
@@ -309,9 +390,96 @@ const FileManager: FC<{
 
   const [toast, setToast] = useState<string | null>(null);
 
+  // recent entry context menu
+  const [recentCtxMenu, setRecentCtxMenu] = useState<{ x: number; y: number; visible: boolean; path: string; name: string; isDirectory: boolean }>({ x: 0, y: 0, visible: false, path: '', name: '', isDirectory: false });
+  const [favCtxMenu, setFavCtxMenu] = useState<{ x: number; y: number; visible: boolean }>({ x: 0, y: 0, visible: false });
+
   // navigation history
   const [navHistory, setNavHistory] = useState<string[][]>([['我的文件']]);
   const [navIndex, setNavIndex] = useState(0);
+
+  // recent tracking (server-persisted)
+  const [recentEntries, setRecentEntries] = useState<VfsHistoryEntry[]>([]);
+
+  const loadRecent = useCallback(async () => {
+    try {
+      const data = await listVfsHistory();
+      setRecentEntries(data.filter(e => !e.isDirectory));
+    } catch { /* ignore */ }
+  }, []);
+
+  const recordRecent = useCallback(async (name: string, fullPath: string, isDir: boolean) => {
+    setRecentEntries(prev => {
+      const filtered = prev.filter(r => !(r.path === fullPath && r.isDirectory === isDir));
+      const entry: VfsHistoryEntry = { name, path: fullPath, isDirectory: isDir, accessedAt: new Date().toISOString() };
+      return [entry, ...filtered].slice(0, 50);
+    });
+    try { await recordVfsHistory(fullPath, name, isDir); } catch { /* ignore */ }
+  }, []);
+
+  // favorites
+  const [favoriteEntries, setFavoriteEntries] = useState<FavoriteEntry[]>([]);
+
+  const loadFavorites = useCallback(async () => {
+    try {
+      const data = await listFavorites();
+      setFavoriteEntries(data);
+    } catch { /* ignore */ }
+  }, []);
+
+  const isFavorited = useCallback((path: string) => {
+    return favoriteEntries.some(f => f.path === path);
+  }, [favoriteEntries]);
+
+  const toggleFavorite = useCallback(async (path: string, name: string, isDirectory: boolean) => {
+    if (isFavorited(path)) {
+      setFavoriteEntries(prev => prev.filter(f => f.path !== path));
+      try { await removeFavorite(path); } catch { /* ignore */ }
+    } else {
+      const entry: FavoriteEntry = { path, name, isDirectory, favoritedAt: new Date().toISOString() };
+      setFavoriteEntries(prev => [entry, ...prev]);
+      try { await addFavorite(path, name, isDirectory); } catch { /* ignore */ }
+    }
+  }, [isFavorited]);
+
+  const checkFavExists = useCallback(async (path: string, isDirectory: boolean): Promise<boolean> => {
+    if (!path) return false;
+    const parts = path.split('/');
+    const parentPath = parts.slice(0, -1).join('/');
+    const name = parts[parts.length - 1];
+    try {
+      const entries = await listVfs(parentPath);
+      const found = entries.some(e => e.name === name && (isDirectory ? e.type === 'folder' : e.type === 'file'));
+      if (found) return true;
+      // Non-empty directories may lack a .keep marker; check if they contain files
+      if (isDirectory) {
+        const children = await listVfs(path);
+        return children.length > 0;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const cleanInvalidFavorites = useCallback(async () => {
+    const results = await Promise.all(
+      favoriteEntries.map(async (entry) => {
+        const exists = await checkFavExists(entry.path, entry.isDirectory);
+        return { entry, exists };
+      }),
+    );
+    const invalid = results.filter(r => !r.exists);
+    if (invalid.length === 0) {
+      setToast('所有收藏均有效');
+      return;
+    }
+    for (const { entry } of invalid) {
+      try { await removeFavorite(entry.path); } catch { /* ignore */ }
+    }
+    setFavoriteEntries(prev => prev.filter(f => results.find(r => r.entry.path === f.path)?.exists));
+    setToast(`已清理 ${invalid.length} 个无效收藏`);
+  }, [favoriteEntries, checkFavExists]);
 
   const navigateTo = useCallback((path: string[]) => {
     setActiveNav('my-files');
@@ -340,35 +508,8 @@ const FileManager: FC<{
     }
   };
 
-  // recent tracking
-  const RECENT_KEY = 'mos_recent_vfs';
-
-  interface RecentEntry {
-    name: string;
-    path: string;
-    isDirectory: boolean;
-    accessedAt: string;
-  }
-
-  const [recentEntries, setRecentEntries] = useState<RecentEntry[]>(() => {
-    try {
-      const raw = localStorage.getItem(RECENT_KEY);
-      return raw ? JSON.parse(raw) : [];
-    } catch { return []; }
-  });
-
-  const recordRecent = useCallback((name: string, fullPath: string, isDir: boolean) => {
-    setRecentEntries(prev => {
-      const filtered = prev.filter(r => !(r.path === fullPath && r.isDirectory === isDir));
-      const entry: RecentEntry = { name, path: fullPath, isDirectory: isDir, accessedAt: new Date().toISOString() };
-      const next = [entry, ...filtered].slice(0, 50);
-      try { localStorage.setItem(RECENT_KEY, JSON.stringify(next)); } catch { /* ignore */ }
-      return next;
-    });
-  }, []);
-
   // column resize
-  const [colWidths, setColWidths] = useState({ time: 140, type: 80, size: 80 });
+  const [colWidths, setColWidths] = useState({ time: 140, type: 80, size: 80, path: 200 });
   const resizeRef = useRef<{ col: string; startX: number; startW: number } | null>(null);
   const [resizing, setResizing] = useState<string | null>(null);
 
@@ -405,10 +546,35 @@ const FileManager: FC<{
 
   useEffect(() => { loadVfs(); }, [loadVfs]);
 
-  // close context menu & dropdowns on any click
+  // Navigate to initialPath when provided
+  useEffect(() => {
+    if (initialPath && initialPath.length > 0) {
+      setActiveNav('my-files');
+      setSelectedPath(initialPath);
+      setNavHistory([initialPath]);
+      setNavIndex(0);
+    }
+  }, []); // only on mount
+
+  useEffect(() => {
+    const handler = () => loadVfs();
+    window.addEventListener('vfs-changed', handler);
+    return () => window.removeEventListener('vfs-changed', handler);
+  }, [loadVfs]);
+
+  // load recent & favorites when switching to those views
+  useEffect(() => {
+    if (activeNav === 'recent') loadRecent();
+    else if (activeNav === 'favorites') loadFavorites();
+  }, [activeNav, loadRecent, loadFavorites]);
+
+  // close context menus & dropdowns on any click
   useEffect(() => {
     const close = (e: MouseEvent) => {
-      setCtxMenu((c) => (c.visible ? { ...c, visible: false } : c));
+      setBgCtxMenu((c) => (c.visible ? { ...c, visible: false } : c));
+      setFileCtxMenu((c) => (c.visible ? { ...c, visible: false } : c));
+      setRecentCtxMenu((c) => (c.visible ? { ...c, visible: false } : c));
+      setFavCtxMenu((c) => (c.visible ? { ...c, visible: false } : c));
       if (moreRef.current && !moreRef.current.contains(e.target as Node)) setShowMoreMenu(false);
       if (sortRef.current && !sortRef.current.contains(e.target as Node)) setShowSortMenu(false);
     };
@@ -425,17 +591,40 @@ const FileManager: FC<{
   // clear selection when directory changes
   useEffect(() => {
     setSelectedItems(new Set());
+    clipboardRef.current = null;
+    setRenamingPath(null);
   }, [selectedPath]);
 
 
   const currentDir = selectedPath.length > 0 ? findNode(vfsTree, selectedPath) : null;
   const currentChildren = currentDir ? currentDir.children : vfsTree;
 
+  // Flat list for shift-range selection (mirrors renderTree order)
+  const flatList = useMemo(
+    () => flattenVisible(currentChildren, '', expandedMainDirs, sortBy, sortAsc, searchQuery),
+    [currentChildren, expandedMainDirs, sortBy, sortAsc, searchQuery],
+  );
+
+  // Select initial entry when provided
+  useEffect(() => {
+    if (initialSelectName && currentChildren.length > 0) {
+      const match = currentChildren.find((n) => n.name === initialSelectName);
+      if (match) {
+        const fullPath = selectedPath.length > 1
+          ? selectedPath.slice(1).join('/') + '/' + initialSelectName
+          : initialSelectName;
+        setSelectedItems(new Set([fullPath]));
+      }
+    }
+  }, [initialSelectName, currentChildren, selectedPath]);
+
   const vfsPath = (extra: string): string => {
     const parts = selectedPath.slice(1);
     if (extra) return [...parts, extra].join('/');
     return parts.join('/');
   };
+  const vfsPathRef = useRef(vfsPath);
+  vfsPathRef.current = vfsPath;
 
   const handleRefresh = () => { setSelectedItems(new Set()); loadVfs(); };
 
@@ -461,25 +650,32 @@ const FileManager: FC<{
 
   // ── create ──
 
-  const openCreateModal = (type: 'folder' | 'file') => {
+  const openCreateModal = (type: 'folder' | 'file' | 'word', parentPath?: string) => {
+    createParentRef.current = parentPath ?? null;
     setCreateType(type);
-    setCreateName('');
+    setCreateName(type === 'word' ? '新建 Word 文档' : '');
     setModalError('');
     setShowCreateModal(true);
   };
 
   const handleCreate = async () => {
-    const name = createName.trim();
+    let name = createName.trim();
     if (!name) { setModalError('请输入名称'); return; }
     if (name.includes('/')) { setModalError('名称不能包含 /'); return; }
+    if (createType === 'word' && !name.toLowerCase().endsWith('.docx')) name += '.docx';
     try {
-      const targetPath = vfsPath(name);
+      const targetPath = createParentRef.current
+        ? createParentRef.current + '/' + name
+        : vfsPath(name);
       if (createType === 'folder') {
         await createFolder(targetPath);
+      } else if (createType === 'word') {
+        await createWordDoc(targetPath);
       } else {
         await createFile(targetPath);
       }
       setShowCreateModal(false);
+      createParentRef.current = null;
       loadVfs();
     } catch (e) {
       setModalError(String(e));
@@ -488,23 +684,60 @@ const FileManager: FC<{
 
   // ── delete ──
 
+  const isEmptyFolder = async (path: string): Promise<boolean> => {
+    try {
+      const entries = await listVfs(path);
+      return entries.length === 0 || entries.every(e => e.type === 'folder');
+    } catch {
+      return false;
+    }
+  };
+
   const handleDeleteClick = () => {
     if (selectedItems.size === 0) return;
     setShowDeleteConfirm(true);
   };
 
   const handleDeleteConfirm = async () => {
+    setDeleting(true);
     try {
       const allItems = [...selectedItems].map(p => findNodeByRelPath(currentChildren, p)).filter(Boolean) as DirNode[];
       for (const item of allItems) {
         const targetPath = vfsPath(item.name);
-        await moveToTrash(targetPath);
+        if (item.isDirectory && await isEmptyFolder(targetPath)) {
+          await deleteVfs(targetPath);
+        } else {
+          await moveToTrash(targetPath);
+        }
       }
       setSelectedItems(new Set());
       setShowDeleteConfirm(false);
       loadVfs();
     } catch (e) {
       console.warn('[FileManager] delete failed:', e);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleSingleDeleteConfirm = async () => {
+    if (!singleDelete) return;
+    setDeleting(true);
+    try {
+      const tp = vfsPath(singleDelete.path);
+      if (singleDelete.isDirectory && await isEmptyFolder(tp)) {
+        await deleteVfs(tp);
+      } else {
+        await moveToTrash(tp);
+      }
+      setSelectedItems(new Set());
+      setSingleDelete(null);
+      loadVfs();
+      setToast(`已删除 "${singleDelete.name}"`);
+    } catch (e) {
+      setToast(`删除失败: ${String(e)}`);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -516,7 +749,7 @@ const FileManager: FC<{
     try {
       const targetPath = vfsPath(relPath);
       await downloadVfsFile(targetPath, name);
-      recordRecent(name, relPath, false);
+      recordRecent(name, targetPath, false);
     } catch (e) {
       console.warn('[FileManager] open file failed:', e);
     }
@@ -525,15 +758,17 @@ const FileManager: FC<{
   const handleDownload = async () => {
     const files = [...selectedItems].map(p => findNodeByRelPath(currentChildren, p)).filter(Boolean).filter(n => n && !n.isDirectory) as DirNode[];
     if (files.length === 0) return;
-    try {
-      for (const file of files) {
-        const targetPath = vfsPath(file.name);
+    for (const file of files) {
+      const targetPath = vfsPath(file.name);
+      const taskId = onAddDownloadTask?.(file.name, targetPath, file.size);
+      try {
         await downloadVfsFile(targetPath, file.name);
+        onCompleteTask?.(taskId ?? '', file.size);
+      } catch (e) {
+        onFailTask?.(taskId ?? '', String(e));
       }
-      setSelectedItems(new Set());
-    } catch (e) {
-      console.warn('[FileManager] download failed:', e);
     }
+    setSelectedItems(new Set());
   };
 
   // ── upload ──
@@ -547,9 +782,16 @@ const FileManager: FC<{
       try {
         const folder = vfsPath('');
         for (const file of Array.from(input.files)) {
-          await uploadFile(file, folder);
+          const taskId = onAddUploadTask?.(file.name, folder || '', file.size);
+          try {
+            await uploadFile(file, folder ? `${folder}/${file.name}` : file.name, (loaded) => onUpdateTask?.(taskId ?? '', loaded), () => onSetTaskWriting?.(taskId ?? ''));
+            onCompleteTask?.(taskId ?? '', file.size);
+          } catch (e) {
+            onFailTask?.(taskId ?? '', String(e));
+          }
         }
         loadVfs();
+        window.dispatchEvent(new CustomEvent('vfs-changed'));
       } catch (e) {
         console.warn('[FileManager] upload file failed:', e);
       }
@@ -569,9 +811,17 @@ const FileManager: FC<{
           const relativePath = file.webkitRelativePath;
           const slashIdx = relativePath.indexOf('/');
           const vfsRelPath = slashIdx >= 0 ? relativePath.substring(slashIdx + 1) : relativePath;
-          await uploadFile(file, vfsPath(vfsRelPath));
+          const destPath = vfsPath(vfsRelPath);
+          const taskId = onAddUploadTask?.(file.name, destPath, file.size);
+          try {
+            await uploadFile(file, destPath, (loaded) => onUpdateTask?.(taskId ?? '', loaded), () => onSetTaskWriting?.(taskId ?? ''));
+            onCompleteTask?.(taskId ?? '', file.size);
+          } catch (e) {
+            onFailTask?.(taskId ?? '', String(e));
+          }
         }
         loadVfs();
+        window.dispatchEvent(new CustomEvent('vfs-changed'));
       } catch (e) {
         console.warn('[FileManager] upload folder failed:', e);
       }
@@ -581,12 +831,340 @@ const FileManager: FC<{
 
   const SORT_LABELS: Record<SortKey, string> = { name: '文件名', time: '修改时间', type: '类型', size: '大小' };
 
-  // ── context menu ──
+  // ── rename ──
 
-  const handleContextMenu = (e: React.MouseEvent) => {
+  const handleRenameStart = useCallback((relPath: string) => {
+    const node = findNodeByRelPath(currentChildren, relPath);
+    if (!node) return;
+    setRenamingPath(relPath);
+    setRenameValue(node.name);
+  }, [currentChildren]);
+
+  const handleRenameConfirm = useCallback(async () => {
+    if (!renamingPath) return;
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === getBaseName(renamingPath)) {
+      setRenamingPath(null);
+      return;
+    }
+    if (trimmed.includes('/')) { setToast('名称不能包含 /'); return; }
+    try {
+      const parentDir = renamingPath.includes('/')
+        ? renamingPath.substring(0, renamingPath.lastIndexOf('/'))
+        : '';
+      const newRelPath = parentDir ? `${parentDir}/${trimmed}` : trimmed;
+      await renameVfs(vfsPath(renamingPath), vfsPath(newRelPath));
+      setRenamingPath(null);
+      setSelectedItems(new Set());
+      loadVfs();
+      setToast('重命名成功');
+    } catch (e) {
+      setToast(`重命名失败: ${String(e)}`);
+    }
+  }, [renamingPath, renameValue, loadVfs]);
+
+  // ── copy/paste ──
+
+  const handlePaste = useCallback(async () => {
+    const clip = clipboardRef.current;
+    if (!clip || clip.paths.length === 0) return;
+    try {
+      for (const srcRel of clip.paths) {
+        const srcNode = findNodeByRelPath(currentChildren, srcRel);
+        if (!srcNode) continue;
+        const baseName = srcNode.name;
+        const ext = getExt(baseName);
+        const nameWithoutExt = ext ? baseName.slice(0, -(ext.length + 1)) : baseName;
+
+        let destName = baseName;
+        let counter = 1;
+        const existingNames = new Set(currentChildren.map(c => c.name));
+        while (existingNames.has(destName)) {
+          destName = ext ? `${nameWithoutExt} - 副本${counter > 1 ? ` (${counter})` : ''}.${ext}`
+            : `${nameWithoutExt} - 副本${counter > 1 ? ` (${counter})` : ''}`;
+          counter++;
+        }
+        const srcFull = vfsPath(srcRel);
+        const destFull = vfsPath(destName);
+        await copyVfs(srcFull, destFull);
+      }
+      clipboardRef.current = null;
+      loadVfs();
+      setToast(`已粘贴 ${clip.paths.length} 个文件`);
+    } catch (e) {
+      setToast(`粘贴失败: ${String(e)}`);
+    }
+  }, [currentChildren, loadVfs]);
+
+  // ── file context menu actions ──
+
+  const handleFileCtxAction = useCallback(async (action: string, menuPath: string, isDir: boolean) => {
+    setFileCtxMenu(c => ({ ...c, visible: false }));
+    const node = findNodeByRelPath(currentChildren, menuPath);
+    const fileName = node?.name || getBaseName(menuPath);
+
+    switch (action) {
+      case 'open': {
+        if (isDir) {
+          navigateTo([...selectedPath, ...menuPath.split('/')]);
+        } else {
+          const fullMenuPath = (() => {
+            const pre = selectedPath.slice(1).join('/');
+            return pre ? `${pre}/${menuPath}` : menuPath;
+          })();
+          if (onOpenFile && isEditableFile(fileName)) {
+            recordRecent(fileName, fullMenuPath, false);
+            onOpenFile(fullMenuPath, fileName);
+          } else {
+            await handleOpenFile(fileName, menuPath);
+          }
+        }
+        break;
+      }
+      case 'download': {
+        try {
+          await downloadVfsFile(vfsPath(menuPath), fileName);
+          const fullMenuPath = (() => {
+            const pre = selectedPath.slice(1).join('/');
+            return pre ? `${pre}/${menuPath}` : menuPath;
+          })();
+          recordRecent(fileName, fullMenuPath, false);
+        } catch (e) { setToast(`下载失败: ${String(e)}`); }
+        break;
+      }
+      case 'rename': {
+        handleRenameStart(menuPath);
+        break;
+      }
+      case 'copy': {
+        clipboardRef.current = { paths: [menuPath], operation: 'copy' };
+        setToast(`已复制 "${fileName}" 到剪贴板`);
+        break;
+      }
+      case 'delete': {
+        setSingleDelete({ path: menuPath, name: fileName, isDirectory: fileCtxMenu.isDirectory });
+        break;
+      }
+    }
+  }, [currentChildren, selectedPath, onOpenFile, handleRenameStart, navigateTo, loadVfs, recordRecent]);
+
+  // ── keyboard shortcuts ──
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+      if (target.isContentEditable) return;
+      if (target.closest('.cm-editor') || target.closest('.text-editor-cm')) return;
+
+      // Backspace - navigate to parent
+      if (e.key === 'Backspace' && selectedPath.length > 1) {
+        e.preventDefault();
+        navigateTo(selectedPath.slice(0, -1));
+        return;
+      }
+
+      // F2 - rename
+      if (e.key === 'F2' && selectedItems.size === 1) {
+        e.preventDefault();
+        const path = [...selectedItems][0];
+        handleRenameStart(path);
+        return;
+      }
+
+      // Delete - delete
+      if (e.key === 'Delete' && selectedItems.size > 0) {
+        e.preventDefault();
+        handleDeleteClick();
+        return;
+      }
+
+      // Ctrl+C - copy
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && selectedItems.size > 0) {
+        e.preventDefault();
+        clipboardRef.current = { paths: [...selectedItems], operation: 'copy' };
+        setToast(`已复制 ${selectedItems.size} 个文件到剪贴板`);
+        return;
+      }
+
+      // Ctrl+V - paste
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v' && !e.shiftKey) {
+        e.preventDefault();
+        handlePaste();
+        return;
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedItems, handleRenameStart, handlePaste, navigateTo, selectedPath]);
+
+  // ── rubber-band selection ──
+
+  useEffect(() => {
+    if (!rubberBand) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      if (!rubberRef.current) return;
+      e.preventDefault();
+      rubberRef.current.endX = e.clientX;
+      rubberRef.current.endY = e.clientY;
+      setRubberBand({ ...rubberRef.current });
+    };
+
+    const onMouseUp = (e: MouseEvent) => {
+      const rb = rubberRef.current;
+      if (!rb || !contentRef.current) {
+        setRubberBand(null);
+        rubberRef.current = null;
+        rubberActiveRef.current = false;
+        return;
+      }
+
+      const left = Math.min(rb.startX, rb.endX);
+      const right = Math.max(rb.startX, rb.endX);
+      const top = Math.min(rb.startY, rb.endY);
+      const bottom = Math.max(rb.startY, rb.endY);
+
+      if (right - left > 4 || bottom - top > 4) {
+        const rows = contentRef.current.querySelectorAll('.fm-file-row');
+        const selected = new Set<string>();
+        rows.forEach((row) => {
+          const rect = row.getBoundingClientRect();
+          if (rect.right > left && rect.left < right && rect.bottom > top && rect.top < bottom) {
+            const path = (row as HTMLElement).dataset.vfsPath;
+            if (path) selected.add(path);
+          }
+        });
+
+        if (!e.ctrlKey && !e.metaKey) {
+          setSelectedItems(selected);
+        } else {
+          setSelectedItems(prev => {
+            const next = new Set(prev);
+            selected.forEach(p => next.add(p));
+            return next;
+          });
+        }
+      }
+
+      setRubberBand(null);
+      rubberRef.current = null;
+      rubberActiveRef.current = false;
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [rubberBand]);
+
+  // ── drag-to-move ──
+
+  const handleDragStart = useCallback((e: React.DragEvent, relPath: string) => {
+    const items = selectedItems.has(relPath) && selectedItems.size > 0
+      ? [...selectedItems]
+      : [relPath];
+    const payload = items.map((p) => {
+      const baseName = p.includes('/') ? p.substring(p.lastIndexOf('/') + 1) : p;
+      return { fullPath: vfsPathRef.current(p), name: baseName, size: 0 };
+    });
+    e.dataTransfer.setData('application/json', JSON.stringify(payload));
+    e.dataTransfer.setData('text/plain', relPath);
+    e.dataTransfer.effectAllowed = 'move';
+  }, [selectedItems]);
+
+  const handleFolderDragOver = useCallback((e: React.DragEvent, folderPath: string) => {
     e.preventDefault();
-    const rect = contentRef.current?.getBoundingClientRect();
-    if (!rect) return;
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverPath(folderPath);
+  }, []);
+
+  const handleFolderDragLeave = useCallback(() => {
+    setDragOverPath(null);
+  }, []);
+
+  const handleFolderDrop = useCallback(async (e: React.DragEvent, destFolderPath: string) => {
+    e.preventDefault();
+    setDragOverPath(null);
+
+    let items: { fullPath: string; name: string; size: number }[] = [];
+
+    try {
+      const jsonData = e.dataTransfer.getData('application/json');
+      if (jsonData) {
+        const parsed = JSON.parse(jsonData);
+        items = Array.isArray(parsed) ? parsed : [parsed];
+      } else {
+        const srcRelPath = e.dataTransfer.getData('text/plain');
+        if (!srcRelPath) return;
+        const baseName = srcRelPath.includes('/') ? srcRelPath.substring(srcRelPath.lastIndexOf('/') + 1) : srcRelPath;
+        items = [{ fullPath: vfsPathRef.current(srcRelPath), name: baseName, size: 0 }];
+      }
+    } catch {
+      const srcRelPath = e.dataTransfer.getData('text/plain');
+      if (!srcRelPath) return;
+      const baseName = srcRelPath.includes('/') ? srcRelPath.substring(srcRelPath.lastIndexOf('/') + 1) : srcRelPath;
+      items = [{ fullPath: vfsPathRef.current(srcRelPath), name: baseName, size: 0 }];
+    }
+
+    if (items.length === 0) return;
+
+    const destDir = vfsPathRef.current(destFolderPath);
+    let movedCount = 0;
+
+    for (const item of items) {
+      const newFullPath = destDir ? `${destDir}/${item.name}` : item.name;
+      if (item.fullPath === newFullPath) continue;
+
+      const existing = findNodeByRelPath(currentChildren, destFolderPath ? `${destFolderPath}/${item.name}` : item.name);
+      if (existing) {
+        setToast(`目标位置已存在 "${item.name}"`);
+        continue;
+      }
+
+      try {
+        await renameVfs(item.fullPath, newFullPath);
+        const sourceDir = item.fullPath.substring(0, item.fullPath.lastIndexOf('/')) || '';
+        onAddMoveTask?.(item.name, item.fullPath, item.size || 0, sourceDir, destDir);
+        movedCount++;
+      } catch (err) {
+        setToast(`移动 "${item.name}" 失败: ${String(err)}`);
+      }
+    }
+
+    if (movedCount > 0) {
+      setSelectedItems(new Set());
+      loadVfs();
+      window.dispatchEvent(new CustomEvent('vfs-changed'));
+      setToast(`已移动 ${movedCount} 个文件`);
+    }
+  }, [currentChildren, loadVfs, onAddMoveTask]);
+
+  const handleContentDragOver = useCallback((e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes('application/json') && !e.dataTransfer.types.includes('text/plain')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setContentDragOver(true);
+    onDragEnter?.();
+  }, [onDragEnter]);
+
+  const handleContentDragLeave = useCallback((e: React.DragEvent) => {
+    if (e.currentTarget === e.target || !e.currentTarget.contains(e.relatedTarget as Node)) {
+      setContentDragOver(false);
+    }
+  }, []);
+
+  const handleContentDrop = useCallback(async (e: React.DragEvent) => {
+    setContentDragOver(false);
+    await handleFolderDrop(e, '');
+  }, [handleFolderDrop]);
+
+  // ── background context menu ──
+
+  const handleBgContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
     const menuW = 170;
     const menuH = 190;
     let sx = e.clientX;
@@ -595,10 +1173,10 @@ const FileManager: FC<{
     if (sy + menuH > window.innerHeight) sy = e.clientY - menuH;
     if (sx < 0) sx = 0;
     if (sy < 0) sy = 0;
-    setCtxMenu({ x: sx - rect.left, y: sy - rect.top, visible: true });
+    setBgCtxMenu({ x: sx, y: sy, visible: true });
   };
 
-  const ctxItems: { label: string; icon: React.ReactNode; action: () => void }[] = [
+  const bgCtxItems: { label: string; icon: React.ReactNode; action: () => void }[] = [
     {
       label: '刷新',
       icon: (
@@ -633,6 +1211,17 @@ const FileManager: FC<{
       action: () => openCreateModal('file'),
     },
     {
+      label: '新建Word文档',
+      icon: (
+        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+          <path d="M4 1.5h5l3 3v9a1 1 0 01-1 1H4a1 1 0 01-1-1v-12a1 1 0 011-1z" fill="#2b7cd3" stroke="#1e5fa8" strokeWidth="0.8" />
+          <path d="M9 1.5v3h3" fill="none" stroke="#1e5fa8" strokeWidth="0.8" />
+          <path d="M5 8.5l1.5 4 1-2.5 1 2.5 1.5-4" stroke="#fff" strokeWidth="1" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ),
+      action: () => openCreateModal('word'),
+    },
+    {
       label: '上传文件夹',
       icon: (
         <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
@@ -655,6 +1244,25 @@ const FileManager: FC<{
     },
   ];
 
+  // ── paste action (used in bg context menu too) ──
+
+  const ctxItemsWithPaste = clipboardRef.current
+    ? [
+        ...bgCtxItems.slice(0, 1),
+        {
+          label: `粘贴 (${clipboardRef.current.paths.length} 个文件)`,
+          icon: (
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+              <rect x="4" y="2" width="9" height="12" rx="1" stroke="currentColor" strokeWidth="1.3" />
+              <path d="M3 4h1v11h9v1a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.3" />
+            </svg>
+          ),
+          action: () => handlePaste(),
+        },
+        ...bgCtxItems.slice(1),
+      ]
+    : bgCtxItems;
+
   return (
     <div className="fm-container">
       {/* ===== Create Modal ===== */}
@@ -662,12 +1270,13 @@ const FileManager: FC<{
         <div className="fm-modal-overlay" onClick={() => setShowCreateModal(false)}>
           <div className="fm-modal" onClick={(e) => e.stopPropagation()}>
             <div className="fm-modal-header">
-              {createType === 'folder' ? '新建文件夹' : '新建文件'}
+              {createType === 'folder' ? '新建文件夹' : createType === 'word' ? '新建Word文档' : '新建文件'}
             </div>
             <div className="fm-modal-body">
               <input
                 autoFocus
                 value={createName}
+                onFocus={(e) => e.target.select()}
                 onChange={(e) => { setCreateName(e.target.value); setModalError(''); }}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleCreate(); if (e.key === 'Escape') setShowCreateModal(false); }}
                 placeholder={createType === 'folder' ? '请输入文件夹名称' : '请输入文件名称'}
@@ -685,10 +1294,10 @@ const FileManager: FC<{
 
       {/* ===== Delete Confirm Modal ===== */}
       {showDeleteConfirm && (
-        <div className="fm-modal-overlay" onClick={() => setShowDeleteConfirm(false)}>
+        <div className="fm-modal-overlay" onClick={() => { if (!deleting) setShowDeleteConfirm(false); }}>
           <div className="fm-modal" onClick={(e) => e.stopPropagation()}>
             <div className="fm-modal-header">确认删除</div>
-            <div className="fm-modal-body" style={{ color: '#9ca3af', fontSize: '0.875rem', lineHeight: 1.6 }}>
+            <div className="fm-modal-body" style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', lineHeight: 1.6 }}>
               <p>确定要删除以下 {deleteTargets.length} 个{deleteTargets.length === 1 ? '项' : '项'}吗？</p>
               <div style={{ marginTop: '0.5rem', maxHeight: 120, overflowY: 'auto' }}>
                 {deleteTargets.map((item) => (
@@ -698,13 +1307,54 @@ const FileManager: FC<{
                   </div>
                 ))}
               </div>
-              <p style={{ marginTop: '0.75rem', color: '#f87171', fontSize: '0.8125rem' }}>
+              <p style={{ marginTop: '0.75rem', color: 'var(--error-text)', fontSize: '0.8125rem' }}>
                 {deleteTargets.some(i => i.isDirectory) ? '删除文件夹将同时删除其中的所有内容。' : ''}
               </p>
             </div>
             <div className="fm-modal-footer">
-              <button onClick={() => setShowDeleteConfirm(false)} className="fm-modal-btn fm-modal-btn-cancel">取消</button>
-              <button onClick={handleDeleteConfirm} className="fm-modal-btn fm-modal-btn-danger">删除</button>
+              <button onClick={() => setShowDeleteConfirm(false)} disabled={deleting} className="fm-modal-btn fm-modal-btn-cancel">取消</button>
+              <button onClick={handleDeleteConfirm} disabled={deleting} className="fm-modal-btn fm-modal-btn-danger" style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', justifyContent: 'center' }}>
+                {deleting && (
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none" className="transfer-spinner">
+                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" strokeDasharray="28" strokeLinecap="round" />
+                  </svg>
+                )}
+                {deleting ? '删除中…' : '删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== Single Delete Confirm Modal ===== */}
+      {singleDelete && (
+        <div className="fm-modal-overlay" onClick={() => { if (!deleting) setSingleDelete(null); }}>
+          <div className="fm-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="fm-modal-header">确认删除</div>
+            <div className="fm-modal-body" style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', lineHeight: 1.6 }}>
+              <p>确定要删除以下项目吗？</p>
+              <div style={{ marginTop: '0.5rem' }}>
+                <div style={{ padding: '0.125rem 0', display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
+                  {singleDelete.isDirectory ? <IconFolder /> : <IconFile />}
+                  <span>{singleDelete.name}</span>
+                </div>
+              </div>
+              {singleDelete.isDirectory && (
+                <p style={{ marginTop: '0.75rem', color: 'var(--error-text)', fontSize: '0.8125rem' }}>
+                  删除文件夹将同时删除其中的所有内容。
+                </p>
+              )}
+            </div>
+            <div className="fm-modal-footer">
+              <button onClick={() => setSingleDelete(null)} disabled={deleting} className="fm-modal-btn fm-modal-btn-cancel">取消</button>
+              <button onClick={handleSingleDeleteConfirm} disabled={deleting} className="fm-modal-btn fm-modal-btn-danger" style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', justifyContent: 'center' }}>
+                {deleting && (
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none" className="transfer-spinner">
+                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" strokeDasharray="28" strokeLinecap="round" />
+                  </svg>
+                )}
+                {deleting ? '删除中…' : '删除'}
+              </button>
             </div>
           </div>
         </div>
@@ -764,12 +1414,31 @@ const FileManager: FC<{
                 <div className="fm-toolbar-sep" />
                 <div className="fm-breadcrumb">
                   {activeNav === 'recent' ? (
-                    <span className="fm-breadcrumb-item" style={{ cursor: 'default', color: '#9ca3af' }}>
+                    <span className="fm-breadcrumb-item" style={{ cursor: 'default', color: 'var(--text-secondary)' }}>
                       <svg viewBox="0 0 20 20" width="14" height="14" fill="none">
                         <circle cx="10" cy="10" r="7" stroke="currentColor" strokeWidth="1.3" />
                         <path d="M10 6v4l2.5 2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
                       </svg>
                       最近访问
+                    </span>
+                  ) : activeNav === 'favorites' ? (
+                    <span className="fm-breadcrumb-item" style={{ cursor: 'default', color: 'var(--text-secondary)' }}>
+                      <svg viewBox="0 0 20 20" width="14" height="14" fill="none">
+                        <path d="M10 2l2.1 5.6 6 .4-4.6 3.8 1.5 5.7L10 14.3 5 17.5l1.5-5.7L1.9 8l6-.4L10 2z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                      </svg>
+                      我的收藏
+                    </span>
+                  ) : activeNav === 'my-shares' || activeNav === 'shared-others' ? (
+                    <span className="fm-breadcrumb-item" style={{ cursor: 'default', color: 'var(--text-secondary)' }}>
+                      <svg viewBox="0 0 20 20" width="14" height="14" fill="none">
+                        {activeNav === 'my-shares' ? (
+                          <path d="M14 7l-4-4-4 4M10 3v10" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                        ) : (
+                          <path d="M10 10l-4-4 4-4M6 6v8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                        )}
+                        <path d="M3 13v3a1 1 0 001 1h12a1 1 0 001-1v-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                      </svg>
+                      {NAV_LABELS[activeNav]}
                     </span>
                   ) : (
                     <>
@@ -809,7 +1478,7 @@ const FileManager: FC<{
               </div>
             </div>
 
-            {activeNav !== 'recent' ? (
+            {activeNav === 'my-files' ? (
               <>
             {/* 操作按钮栏 */}
             <div className="fm-actionbar">
@@ -821,13 +1490,13 @@ const FileManager: FC<{
                   </svg>
                   <span>上传文件夹</span>
                 </button>
-                <button className="fm-action-btn" onClick={() => openCreateModal('folder')} title="新建文件夹">
+                <button className="fm-action-btn" onClick={handleUploadFile} title="上传文件">
                   <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
-                    <path d="M2 4.5C2 3.67 2.67 3 3.5 3h3l1.5 1.5h4.5c.83 0 1.5.67 1.5 1.5V12a1.5 1.5 0 01-1.5 1.5H3.5A1.5 1.5 0 012 12V4.5z" fill="#F7C948" stroke="#D4A017" strokeWidth="0.8" />
-                    <line x1="8" y1="8" x2="8" y2="11" stroke="#60a5fa" strokeWidth="1.2" strokeLinecap="round" />
-                    <line x1="6.5" y1="9.5" x2="9.5" y2="9.5" stroke="#60a5fa" strokeWidth="1.2" strokeLinecap="round" />
+                    <path d="M4 1.5h5l3 3v9a1 1 0 01-1 1H4a1 1 0 01-1-1v-12a1 1 0 011-1z" fill="#6b7280" stroke="#4b5563" strokeWidth="0.8" />
+                    <path d="M9 1.5v3h3" fill="none" stroke="#4b5563" strokeWidth="0.8" />
+                    <path d="M8 5v5M5.5 7.5h5" stroke="#34d399" strokeWidth="1.2" strokeLinecap="round" />
                   </svg>
-                  <span>新建文件夹</span>
+                  <span>上传文件</span>
                 </button>
                 <button
                   className={`fm-action-btn${selectedItems.size === 0 || ![...selectedItems].some(p => { const n = findNodeByRelPath(currentChildren, p); return n && !n.isDirectory; }) ? ' fm-action-btn-disabled' : ''}`}
@@ -882,13 +1551,21 @@ const FileManager: FC<{
                         </svg>
                         <span>新建文件</span>
                       </button>
-                      <button className="fm-dropdown-item" onClick={() => { setShowMoreMenu(false); handleUploadFile(); }}>
+                      <button className="fm-dropdown-item" onClick={() => { setShowMoreMenu(false); openCreateModal('word'); }}>
                         <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
-                          <path d="M4 1.5h5l3 3v9a1 1 0 01-1 1H4a1 1 0 01-1-1v-12a1 1 0 011-1z" fill="#6b7280" stroke="#4b5563" strokeWidth="0.8" />
-                          <path d="M9 1.5v3h3" fill="none" stroke="#4b5563" strokeWidth="0.8" />
-                          <path d="M8 5v5M5.5 7.5h5" stroke="#34d399" strokeWidth="1.2" strokeLinecap="round" />
+                          <path d="M4 1.5h5l3 3v9a1 1 0 01-1 1H4a1 1 0 01-1-1v-12a1 1 0 011-1z" fill="#2b7cd3" stroke="#1e5fa8" strokeWidth="0.8" />
+                          <path d="M9 1.5v3h3" fill="none" stroke="#1e5fa8" strokeWidth="0.8" />
+                          <path d="M5 8.5l1.5 4 1-2.5 1 2.5 1.5-4" stroke="#fff" strokeWidth="1" fill="none" strokeLinecap="round" strokeLinejoin="round" />
                         </svg>
-                        <span>上传文件</span>
+                        <span>新建Word文档</span>
+                      </button>
+                      <button className="fm-dropdown-item" onClick={() => { setShowMoreMenu(false); openCreateModal('folder'); }}>
+                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                          <path d="M2 4.5C2 3.67 2.67 3 3.5 3h3l1.5 1.5h4.5c.83 0 1.5.67 1.5 1.5V12a1.5 1.5 0 01-1.5 1.5H3.5A1.5 1.5 0 012 12V4.5z" fill="#F7C948" stroke="#D4A017" strokeWidth="0.8" />
+                          <line x1="8" y1="8" x2="8" y2="11" stroke="#60a5fa" strokeWidth="1.2" strokeLinecap="round" />
+                          <line x1="6.5" y1="9.5" x2="9.5" y2="9.5" stroke="#60a5fa" strokeWidth="1.2" strokeLinecap="round" />
+                        </svg>
+                        <span>新建文件夹</span>
                       </button>
                     </div>
                   )}
@@ -966,9 +1643,24 @@ const FileManager: FC<{
 
             {/* 文件列表 */}
             <div
-              className="fm-content"
+              className={`fm-content${contentDragOver ? ' fm-content-dragover' : ''}`}
               ref={contentRef}
-              onContextMenu={handleContextMenu}
+              onContextMenu={handleBgContextMenu}
+              onDragOver={handleContentDragOver}
+              onDragLeave={handleContentDragLeave}
+              onDrop={handleContentDrop}
+              onMouseDown={(e) => {
+                const target = e.target as HTMLElement;
+                if (e.button !== 0) return;
+                if (target.closest('.fm-file-row') || target.closest('.fm-file-header') || target.closest('.fm-col-resize')) return;
+                if (!contentRef.current?.contains(target)) return;
+
+                const x = e.clientX;
+                const y = e.clientY;
+                rubberRef.current = { startX: x, startY: y, endX: x, endY: y };
+                rubberActiveRef.current = true;
+                setRubberBand({ startX: x, startY: y, endX: x, endY: y });
+              }}
             >
               {currentChildren.length === 0 ? (
                 <div className="fm-empty">此目录为空</div>
@@ -996,7 +1688,7 @@ const FileManager: FC<{
                     </button>
                   </div>
                   {(() => {
-                    // Recursive tree row renderer
+                    const vfsRelPath = selectedPath.slice(1).join('/');
                     const renderTree = (nodes: DirNode[], depth: number, parentPath: string): React.ReactNode[] => {
                       const sorted = [...nodes].sort((a, b) => {
                         const dirCmp = b.isDirectory === a.isDirectory ? 0 : b.isDirectory ? 1 : -1;
@@ -1014,49 +1706,92 @@ const FileManager: FC<{
                       for (const node of sorted) {
                         if (searchQuery && !node.name.toLowerCase().includes(searchQuery.toLowerCase())) continue;
                         const fullPath = parentPath ? `${parentPath}/${node.name}` : node.name;
+                        const vfsFullPath = vfsRelPath ? `${vfsRelPath}/${fullPath}` : fullPath;
                         const isSel = selectedItems.has(fullPath);
                         const hasChildren = node.isDirectory && node.children.length > 0;
                         const isExpanded = expandedMainDirs.has(fullPath);
+                        const isRenaming = renamingPath === fullPath;
+                        const isDragOver = dragOverPath === fullPath && node.isDirectory;
+
+                        const dragHandlers = {
+                          onDragOver: node.isDirectory
+                            ? (e: React.DragEvent) => handleFolderDragOver(e, fullPath)
+                            : (e: React.DragEvent) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; },
+                          onDragLeave: node.isDirectory ? handleFolderDragLeave : undefined,
+                          onDrop: node.isDirectory ? (e: React.DragEvent) => handleFolderDrop(e, fullPath) : undefined,
+                        };
+
                         result.push(
                           <button
                             key={fullPath}
-                            onClick={(e) => {
-                              if (node.isDirectory && e.detail === 2) {
+                            data-vfs-path={fullPath}
+                            draggable
+                            onDragStart={(e) => handleDragStart(e, fullPath)}
+                            {...dragHandlers}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              if (!isSel) {
+                                setSelectedItems(new Set([fullPath]));
+                                lastClickedRef.current = fullPath;
+                              }
+                              const menuW = 170;
+                              const menuH = node.isDirectory ? 200 : 240;
+                              let sx = e.clientX;
+                              let sy = e.clientY;
+                              if (sx + menuW > window.innerWidth) sx = e.clientX - menuW;
+                              if (sy + menuH > window.innerHeight) sy = e.clientY - menuH;
+                              if (sx < 0) sx = 0;
+                              if (sy < 0) sy = 0;
+                              setFileCtxMenu({ x: sx, y: sy, visible: true, path: fullPath, isDirectory: node.isDirectory });
+                            }}
+                            onDoubleClick={() => {
+                              if (isRenaming) return;
+                              if (node.isDirectory) {
                                 navigateTo([...selectedPath, ...fullPath.split('/')]);
                                 return;
                               }
-                              if (!node.isDirectory && e.detail === 2) {
-                                if (onOpenFile && isEditableFile(node.name)) {
-                                  const vfsRelPath = selectedPath.slice(1).join('/');
-                                  const fullVfsPath = vfsRelPath ? `${vfsRelPath}/${fullPath}` : fullPath;
-                                  onOpenFile(fullVfsPath, node.name);
-                                } else {
-                                  setToast('暂不支持此文件格式');
-                                }
-                                return;
+                              if (onOpenFile && isEditableFile(node.name)) {
+                                const vfsRelPath = selectedPath.slice(1).join('/');
+                                const fullVfsPath = vfsRelPath ? `${vfsRelPath}/${fullPath}` : fullPath;
+                                recordRecent(node.name, fullVfsPath, false);
+                                onOpenFile(fullVfsPath, node.name);
+                              } else {
+                                setToast('暂不支持此文件格式');
                               }
-                              if (node.isDirectory && hasChildren) {
-                                setExpandedMainDirs(prev => {
-                                  const next = new Set(prev);
-                                  if (next.has(fullPath)) next.delete(fullPath);
-                                  else next.add(fullPath);
-                                  return next;
-                                });
-                              }
+                            }}
+                            onClick={(e) => {
+                              if (isRenaming) return;
                               setSelectedItems(prev => {
                                 const next = new Set<string>();
-                                if (e.shiftKey) {
-                                  if (prev.has(fullPath)) next.delete(fullPath);
-                                  else { prev.forEach(v => next.add(v)); next.add(fullPath); }
+                                if (e.ctrlKey || e.metaKey) {
+                                  prev.forEach(v => next.add(v));
+                                  if (next.has(fullPath)) next.delete(fullPath);
+                                  else next.add(fullPath);
+                                  if (next.has(fullPath)) lastClickedRef.current = fullPath;
+                                  else if (lastClickedRef.current === fullPath) lastClickedRef.current = null;
+                                } else if (e.shiftKey && lastClickedRef.current) {
+                                  const anchorIdx = flatList.findIndex(f => f.path === lastClickedRef.current);
+                                  const currentIdx = flatList.findIndex(f => f.path === fullPath);
+                                  if (anchorIdx >= 0 && currentIdx >= 0) {
+                                    const start = Math.min(anchorIdx, currentIdx);
+                                    const end = Math.max(anchorIdx, currentIdx);
+                                    for (let i = start; i <= end; i++) {
+                                      next.add(flatList[i].path);
+                                    }
+                                  } else {
+                                    next.add(fullPath);
+                                  }
                                 } else {
-                                  if (!prev.has(fullPath) || prev.size !== 1) { next.clear(); next.add(fullPath); }
+                                  next.add(fullPath);
+                                  lastClickedRef.current = fullPath;
                                 }
                                 return next;
                               });
                             }}
-                            className={`fm-file-row${isSel ? ' fm-file-row-selected' : ''}`}
+                            className={`fm-file-row${isSel ? ' fm-file-row-selected' : ''}${isDragOver ? ' fm-file-row-drop-target' : ''}`}
                           >
-                            <span className="fm-col-name" style={{ paddingLeft: 8 + depth * 16 }}>
+                            <span className="fm-col-name" style={depth > 0 ? { paddingLeft: depth * 16 } : undefined}>
                               <span className={`fm-tree-arrow${hasChildren ? '' : ' fm-tree-arrow-empty'}`} onClick={(e) => {
                                 if (!hasChildren) return;
                                 e.stopPropagation();
@@ -1074,7 +1809,38 @@ const FileManager: FC<{
                                 ) : null}
                               </span>
                               {node.isDirectory ? (isExpanded && hasChildren ? <IconFolderOpen /> : <IconFolder />) : <IconFile />}
-                              <span className="fm-file-name-text">{node.name}</span>
+                              {isRenaming ? (
+                                <input
+                                  className="fm-rename-input"
+                                  value={renameValue}
+                                  onChange={(e) => setRenameValue(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleRenameConfirm();
+                                    if (e.key === 'Escape') setRenamingPath(null);
+                                    e.stopPropagation();
+                                  }}
+                                  onBlur={handleRenameConfirm}
+                                  onClick={(e) => e.stopPropagation()}
+                                  autoFocus
+                                />
+                              ) : (
+                                <span className="fm-file-name-text">{node.name}</span>
+                              )}
+                              <span
+                                className={`fm-fav-star${isFavorited(vfsFullPath) ? ' fm-fav-star-active' : ''}`}
+                                onClick={(e) => { e.stopPropagation(); toggleFavorite(vfsFullPath, node.name, node.isDirectory); }}
+                                title={isFavorited(vfsFullPath) ? '取消收藏' : '添加到收藏'}
+                              >
+                                {isFavorited(fullPath) ? (
+                                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                                    <path d="M8 1.5l1.9 4.9 5.1.4-3.8 3.2 1.2 5.2L8 12.7l-4.4 2.5 1.2-5.2L1 6.8l5.1-.4L8 1.5z" fill="#F7C948" stroke="#D4A017" strokeWidth="0.8" />
+                                  </svg>
+                                ) : (
+                                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none" className="fm-fav-star-outline">
+                                    <path d="M8 1.5l1.9 4.9 5.1.4-3.8 3.2 1.2 5.2L8 12.7l-4.4 2.5 1.2-5.2L1 6.8l5.1-.4L8 1.5z" stroke="#9ca3af" strokeWidth="1" strokeLinejoin="round" />
+                                  </svg>
+                                )}
+                              </span>
                             </span>
                             <span className="fm-col-time" style={{ width: colWidths.time }}>{formatTime(node.modifiedAt)}</span>
                             <span className="fm-col-type" style={{ width: colWidths.type }}>{getFileType(node.name, node.isDirectory)}</span>
@@ -1092,17 +1858,30 @@ const FileManager: FC<{
                 </div>
               )}
 
-              {/* context menu */}
-              {ctxMenu.visible && (
-                <div className="fm-ctxmenu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
-                  {ctxItems.map((item, i) => (
+              {/* rubber-band overlay */}
+              {rubberBand && (
+                <div
+                  className="fm-rubberband"
+                  style={{
+                    left: Math.min(rubberBand.startX, rubberBand.endX),
+                    top: Math.min(rubberBand.startY, rubberBand.endY),
+                    width: Math.abs(rubberBand.endX - rubberBand.startX),
+                    height: Math.abs(rubberBand.endY - rubberBand.startY),
+                  }}
+                />
+              )}
+
+              {/* Background context menu */}
+              {bgCtxMenu.visible && (
+                <div className="fm-ctxmenu" style={{ left: bgCtxMenu.x, top: bgCtxMenu.y, position: 'fixed' }}>
+                  {ctxItemsWithPaste.map((item) => (
                     <React.Fragment key={item.label}>
-                      {i === 1 || i === 3 ? <div className="fm-ctxmenu-sep" /> : null}
+                      {item.label.startsWith('粘贴') || item.label === '上传文件夹' ? <div className="fm-ctxmenu-sep" /> : null}
                       <button
                         className="fm-ctxmenu-item"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setCtxMenu({ ...ctxMenu, visible: false });
+                          setBgCtxMenu({ ...bgCtxMenu, visible: false });
                           item.action();
                         }}
                       >
@@ -1113,9 +1892,141 @@ const FileManager: FC<{
                   ))}
                 </div>
               )}
+
+              {/* File context menu */}
+              {fileCtxMenu.visible && (
+                <div className="fm-ctxmenu" style={{ left: fileCtxMenu.x, top: fileCtxMenu.y, position: 'fixed' }}>
+                  <button className="fm-ctxmenu-item" onClick={() => handleFileCtxAction('open', fileCtxMenu.path, fileCtxMenu.isDirectory)}>
+                    <span className="fm-ctxmenu-icon">
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                        <path d="M5 2h6l4 4v9a1 1 0 01-1 1H5a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.3" />
+                        <path d="M11 2v4h4" stroke="currentColor" strokeWidth="1.3" />
+                      </svg>
+                    </span>
+                    <span>打开</span>
+                  </button>
+                  {fileCtxMenu.isDirectory && (
+                    <>
+                      <button className="fm-ctxmenu-item" onClick={() => {
+                        setFileCtxMenu(c => ({ ...c, visible: false }));
+                        const vfsPre = selectedPath.slice(1).join('/');
+                        const fullP = vfsPre ? `${vfsPre}/${fileCtxMenu.path}` : fileCtxMenu.path;
+                        openCreateModal('folder', fullP);
+                      }}>
+                        <span className="fm-ctxmenu-icon">
+                          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                            <path d="M2 5.5C2 4.67 2.67 4 3.5 4h3l2 2h4c.83 0 1.5.67 1.5 1.5V13a1.5 1.5 0 01-1.5 1.5H3.5A1.5 1.5 0 012 13V5.5z" fill="#F7C948" stroke="#D4A017" strokeWidth="0.8" />
+                            <path d="M7.5 9v3M6 10.5h3" stroke="#4b5563" strokeWidth="1" strokeLinecap="round" />
+                          </svg>
+                        </span>
+                        <span>新建文件夹</span>
+                      </button>
+                      <button className="fm-ctxmenu-item" onClick={() => {
+                        setFileCtxMenu(c => ({ ...c, visible: false }));
+                        const vfsPre = selectedPath.slice(1).join('/');
+                        const fullP = vfsPre ? `${vfsPre}/${fileCtxMenu.path}` : fileCtxMenu.path;
+                        openCreateModal('file', fullP);
+                      }}>
+                        <span className="fm-ctxmenu-icon">
+                          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                            <path d="M5 2h6l4 4v9a1 1 0 01-1 1H5a1 1 0 01-1-1V3a1 1 0 011-1z" fill="#6b7280" stroke="#4b5563" strokeWidth="0.8" />
+                            <path d="M11 2v4h4" fill="none" stroke="#4b5563" strokeWidth="0.8" />
+                            <path d="M8 8v4M6 10h4" stroke="#9ca3af" strokeWidth="1" strokeLinecap="round" />
+                          </svg>
+                        </span>
+                        <span>新建文件</span>
+                      </button>
+                      <button className="fm-ctxmenu-item" onClick={() => {
+                        setFileCtxMenu(c => ({ ...c, visible: false }));
+                        const vfsPre = selectedPath.slice(1).join('/');
+                        const fullP = vfsPre ? `${vfsPre}/${fileCtxMenu.path}` : fileCtxMenu.path;
+                        openCreateModal('word', fullP);
+                      }}>
+                        <span className="fm-ctxmenu-icon">
+                          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                            <path d="M4 1.5h5l3 3v9a1 1 0 01-1 1H4a1 1 0 01-1-1v-12a1 1 0 011-1z" fill="#2b7cd3" stroke="#1e5fa8" strokeWidth="0.8" />
+                            <path d="M9 1.5v3h3" fill="none" stroke="#1e5fa8" strokeWidth="0.8" />
+                            <path d="M5 8.5l1.5 4 1-2.5 1 2.5 1.5-4" stroke="#fff" strokeWidth="1" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        </span>
+                        <span>新建Word文档</span>
+                      </button>
+                    </>
+                  )}
+                  {!fileCtxMenu.isDirectory && (
+                    <button className="fm-ctxmenu-item" onClick={() => handleFileCtxAction('download', fileCtxMenu.path, false)}>
+                      <span className="fm-ctxmenu-icon">
+                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                          <path d="M8 2v8M4 7l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                          <path d="M2 12v1a1 1 0 001 1h10a1 1 0 001-1v-1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                        </svg>
+                      </span>
+                      <span>下载</span>
+                    </button>
+                  )}
+                  <div className="fm-ctxmenu-sep" />
+                  <button className="fm-ctxmenu-item" onClick={() => handleFileCtxAction('rename', fileCtxMenu.path, fileCtxMenu.isDirectory)}>
+                    <span className="fm-ctxmenu-icon">
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                        <path d="M11 2l3 3-9 9H2v-3L11 2z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                      </svg>
+                    </span>
+                    <span>重命名</span>
+                  </button>
+                  <button className="fm-ctxmenu-item" onClick={() => {
+                    const p = fileCtxMenu.path;
+                    setFileCtxMenu(c => ({ ...c, visible: false }));
+                    const node = findNodeByRelPath(currentChildren, p);
+                    const vfsPre = selectedPath.slice(1).join('/');
+                    const fullP = vfsPre ? `${vfsPre}/${p}` : p;
+                    toggleFavorite(fullP, node?.name || getBaseName(p), fileCtxMenu.isDirectory);
+                  }}>
+                    <span className="fm-ctxmenu-icon">
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                        <path d="M8 1.5l1.9 4.9 5.1.4-3.8 3.2 1.2 5.2L8 12.7l-4.4 2.5 1.2-5.2L1 6.8l5.1-.4L8 1.5z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                      </svg>
+                    </span>
+                    <span>{isFavorited((() => { const vfsPre = selectedPath.slice(1).join('/'); return vfsPre ? `${vfsPre}/${fileCtxMenu.path}` : fileCtxMenu.path; })()) ? '取消收藏' : '添加到收藏'}</span>
+                  </button>
+                  <button className="fm-ctxmenu-item" onClick={() => handleFileCtxAction('copy', fileCtxMenu.path, fileCtxMenu.isDirectory)}>
+                    <span className="fm-ctxmenu-icon">
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                        <rect x="5" y="2" width="8" height="11" rx="1" stroke="currentColor" strokeWidth="1.3" />
+                        <path d="M3 4h1v10h8v1a1 1 0 01-1 1H3a1 1 0 01-1-1V5a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.3" />
+                      </svg>
+                    </span>
+                    <span>复制</span>
+                  </button>
+                  {clipboardRef.current && clipboardRef.current.paths.length > 0 && (
+                    <button className="fm-ctxmenu-item" onClick={() => { setFileCtxMenu(c => ({ ...c, visible: false })); handlePaste(); }}>
+                      <span className="fm-ctxmenu-icon">
+                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                          <rect x="4" y="2" width="9" height="12" rx="1" stroke="currentColor" strokeWidth="1.3" />
+                          <path d="M3 4h1v11h9v1a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.3" />
+                        </svg>
+                      </span>
+                      <span>粘贴</span>
+                    </button>
+                  )}
+                  <div className="fm-ctxmenu-sep" />
+                  <button className="fm-ctxmenu-item fm-ctxmenu-item-danger" onClick={() => handleFileCtxAction('delete', fileCtxMenu.path, fileCtxMenu.isDirectory)}>
+                    <span className="fm-ctxmenu-icon">
+                      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                        <path d="M3 4h10l-1 10a1 1 0 01-1 1H5a1 1 0 01-1-1L3 4z" stroke="currentColor" strokeWidth="1.3" />
+                        <path d="M2 4h12M6 4V3a1 1 0 011-1h2a1 1 0 011 1v1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                      </svg>
+                    </span>
+                    <span>删除</span>
+                  </button>
+                </div>
+              )}
             </div>
               </>
-            ) : (
+            ) : activeNav === 'my-shares' ? (
+              <SharesPanel kind="mine" onToast={setToast} />
+            ) : activeNav === 'shared-others' ? (
+              <SharesPanel kind="received" onToast={setToast} />
+            ) : activeNav === 'recent' ? (
               <div className="fm-content">
                 {recentEntries.length === 0 ? (
                   <div className="fm-empty">暂无最近访问记录</div>
@@ -1128,34 +2039,173 @@ const FileManager: FC<{
                       <div className="fm-col-resize" />
                       <button className="fm-col-header fm-col-type" style={{ width: colWidths.type }}><span>类型</span></button>
                       <div className="fm-col-resize" />
-                      <button className="fm-col-header fm-col-size" style={{ width: colWidths.size }}><span>-</span></button>
+                      <button className="fm-col-header fm-col-size" style={{ width: colWidths.size }}><span>大小</span></button>
                     </div>
-                    {recentEntries.filter(e => !e.isDirectory).map((entry) => (
+                    {recentEntries.map((entry) => (
+                        <button
+                          key={`${entry.path}|${entry.isDirectory}`}
+                          className="fm-file-row"
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            const menuW = 160;
+                            const menuH = 80;
+                            let sx = e.clientX;
+                            let sy = e.clientY;
+                            if (sx + menuW > window.innerWidth) sx = e.clientX - menuW;
+                            if (sy + menuH > window.innerHeight) sy = e.clientY - menuH;
+                            setRecentCtxMenu({ x: sx, y: sy, visible: true, path: entry.path, name: entry.name, isDirectory: entry.isDirectory });
+                          }}
+                          onClick={() => {
+                            if (entry.isDirectory) {
+                              const parts = entry.path.split('/');
+                              onOpenFileManagerAt?.(['我的文件', ...parts]);
+                            } else {
+                              onOpenFile?.(entry.path, entry.name);
+                            }
+                          }}
+                        >
+                          <span className="fm-col-name">
+                            <span className="fm-tree-arrow fm-tree-arrow-empty" />
+                            {entry.isDirectory ? <IconFolder /> : <IconFile />}
+                            <span className="fm-file-name-text">{entry.name}</span>
+                            <span
+                              className={`fm-fav-star${isFavorited(entry.path) ? ' fm-fav-star-active' : ''}`}
+                              onClick={(e) => { e.stopPropagation(); toggleFavorite(entry.path, entry.name, entry.isDirectory); }}
+                              title={isFavorited(entry.path) ? '取消收藏' : '添加到收藏'}
+                            >
+                              {isFavorited(entry.path) ? (
+                                <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                                  <path d="M8 1.5l1.9 4.9 5.1.4-3.8 3.2 1.2 5.2L8 12.7l-4.4 2.5 1.2-5.2L1 6.8l5.1-.4L8 1.5z" fill="#F7C948" stroke="#D4A017" strokeWidth="0.8" />
+                                </svg>
+                              ) : (
+                                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" className="fm-fav-star-outline">
+                                  <path d="M8 1.5l1.9 4.9 5.1.4-3.8 3.2 1.2 5.2L8 12.7l-4.4 2.5 1.2-5.2L1 6.8l5.1-.4L8 1.5z" stroke="#9ca3af" strokeWidth="1" strokeLinejoin="round" />
+                                </svg>
+                              )}
+                            </span>
+                          </span>
+                          <span className="fm-col-time" style={{ width: colWidths.time }}>{formatTime(entry.accessedAt)}</span>
+                          <span className="fm-col-type" style={{ width: colWidths.type }}>{getFileType(entry.name, entry.isDirectory)}</span>
+                          <span className="fm-col-size" style={{ width: colWidths.size }}>{entry.isDirectory ? '-' : '-'}</span>
+                        </button>
+                    ))}
+                    {recentCtxMenu.visible && (
+                      <div className="fm-ctxmenu" style={{ left: recentCtxMenu.x, top: recentCtxMenu.y, position: 'fixed' }}>
+                        <button className="fm-ctxmenu-item" onClick={() => {
+                          setRecentCtxMenu(c => ({ ...c, visible: false }));
+                          const parts = recentCtxMenu.path.split('/');
+                          if (recentCtxMenu.isDirectory) {
+                            onOpenFileManagerAt?.(['我的文件', ...parts]);
+                          } else {
+                            const parentParts = parts.slice(0, -1);
+                            const fileName = parts[parts.length - 1];
+                            onOpenFileManagerAt?.(['我的文件', ...parentParts], fileName);
+                          }
+                        }}>
+                          <span className="fm-ctxmenu-icon">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                              <path d="M5 2h6l4 4v9a1 1 0 01-1 1H5a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.3" />
+                              <path d="M11 2v4h4" stroke="currentColor" strokeWidth="1.3" />
+                            </svg>
+                          </span>
+                          <span>打开文件路径</span>
+                        </button>
+                        <div className="fm-ctxmenu-sep" />
+                        <button className="fm-ctxmenu-item fm-ctxmenu-item-danger" onClick={async () => {
+                          setRecentCtxMenu(c => ({ ...c, visible: false }));
+                          setRecentEntries(prev => prev.filter(r => r.path !== recentCtxMenu.path));
+                          try { await removeVfsHistory(recentCtxMenu.path); } catch { /* ignore */ }
+                        }}>
+                          <span className="fm-ctxmenu-icon">
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                              <path d="M3 4h10l-1 10a1 1 0 01-1 1H5a1 1 0 01-1-1L3 4z" stroke="currentColor" strokeWidth="1.3" />
+                              <path d="M2 4h12M6 4V3a1 1 0 011-1h2a1 1 0 011 1v1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                            </svg>
+                          </span>
+                          <span>删除访问记录</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="fm-content" onContextMenu={(e) => {
+                e.preventDefault();
+                const menuW = 180;
+                const menuH = 40;
+                let sx = e.clientX;
+                let sy = e.clientY;
+                if (sx + menuW > window.innerWidth) sx = e.clientX - menuW;
+                if (sy + menuH > window.innerHeight) sy = e.clientY - menuH;
+                setFavCtxMenu({ x: sx, y: sy, visible: true });
+              }}>
+                {favoriteEntries.length === 0 ? (
+                  <div className="fm-empty">暂无收藏</div>
+                ) : (
+                  <div className="fm-file-table">
+                    <div className="fm-file-header">
+                      <button className="fm-col-header fm-col-name"><span>名称</span></button>
+                      <div className="fm-col-resize" />
+                      <button className="fm-col-header fm-col-time" style={{ width: colWidths.time }}><span>收藏时间</span></button>
+                      <div className="fm-col-resize" />
+                      <button className="fm-col-header fm-col-type" style={{ width: colWidths.type }}><span>类型</span></button>
+                      <div className="fm-col-resize" />
+                      <button className="fm-col-header fm-col-size" style={{ width: colWidths.size }}><span>大小</span></button>
+                    </div>
+                    {favoriteEntries.map((entry) => (
                       <button
                         key={`${entry.path}|${entry.isDirectory}`}
                         className="fm-file-row"
-                        onDoubleClick={() => {
+                        onClick={async () => {
+                          const exists = await checkFavExists(entry.path, entry.isDirectory);
+                          if (!exists) {
+                            setToast(`"${entry.name}" 已不存在`);
+                            return;
+                          }
                           if (entry.isDirectory) {
                             const parts = entry.path.split('/');
-                            navigateTo(parts);
-                          }
-                        }}
-                        onClick={() => {
-                          if (!entry.isDirectory) {
-                            handleOpenFile(entry.name, entry.path);
+                            onOpenFileManagerAt?.(['我的文件', ...parts]);
+                          } else {
+                            onOpenFile?.(entry.path, entry.name);
                           }
                         }}
                       >
-                        <span className="fm-col-name">
+                        <span className="fm-col-name" title={entry.path}>
                           <span className="fm-tree-arrow fm-tree-arrow-empty" />
                           {entry.isDirectory ? <IconFolder /> : <IconFile />}
                           <span className="fm-file-name-text">{entry.name}</span>
+                          <span
+                            className="fm-fav-star fm-fav-star-active"
+                            onClick={(e) => { e.stopPropagation(); toggleFavorite(entry.path, entry.name, entry.isDirectory); }}
+                            title="取消收藏"
+                          >
+                            <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                              <path d="M8 1.5l1.9 4.9 5.1.4-3.8 3.2 1.2 5.2L8 12.7l-4.4 2.5 1.2-5.2L1 6.8l5.1-.4L8 1.5z" fill="#F7C948" stroke="#D4A017" strokeWidth="0.8" />
+                            </svg>
+                          </span>
                         </span>
-                        <span className="fm-col-time" style={{ width: colWidths.time }}>{formatTime(entry.accessedAt)}</span>
+                        <span className="fm-col-time" style={{ width: colWidths.time }}>{formatTime(entry.favoritedAt)}</span>
                         <span className="fm-col-type" style={{ width: colWidths.type }}>{getFileType(entry.name, entry.isDirectory)}</span>
                         <span className="fm-col-size" style={{ width: colWidths.size }}>{entry.isDirectory ? '-' : '-'}</span>
                       </button>
                     ))}
+                  </div>
+                )}
+                {favCtxMenu.visible && (
+                  <div className="fm-ctxmenu" style={{ left: favCtxMenu.x, top: favCtxMenu.y, position: 'fixed' }}>
+                    <button className="fm-ctxmenu-item" onClick={async () => {
+                      setFavCtxMenu(c => ({ ...c, visible: false }));
+                      await cleanInvalidFavorites();
+                    }}>
+                      <span className="fm-ctxmenu-icon">
+                        <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                          <path d="M2 4h12l-1 10a1 1 0 01-1 1H4a1 1 0 01-1-1L2 4z" stroke="currentColor" strokeWidth="1.3" />
+                          <path d="M1 4h14M5 4V3a1 1 0 011-1h4a1 1 0 011 1v1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+                        </svg>
+                      </span>
+                      <span>清理无效收藏</span>
+                    </button>
                   </div>
                 )}
               </div>

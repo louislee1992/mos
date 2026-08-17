@@ -27,6 +27,8 @@
 | receivers | 接收者 accessKey 列表（= 会话其他成员） |
 | createdAt | 创建时间戳 |
 | expiresAt | 过期时间戳（创建时按天数计算） |
+| url | presigned 下载 URL（创建时生成并存储；mine 接口返回时置空） |
+| ownerName | 分享者昵称（received 接口返回时填充） |
 
 无 status 字段：是否过期由 `expiresAt` 与当前时间比较得出。
 
@@ -34,24 +36,24 @@
 
 | 接口 | 说明 |
 |------|------|
-| `POST /api/share` body: `{vfsPath, days, convId}` | 校验源文件存在、convId 成员关系；写记录；对源对象生成 presigned URL；返回 `{shareId, url, name, size, expiresAt}` |
-| `GET /api/share/mine` | 我创建的分享列表（含 name/size/expiresAt/剩余天数；不返回 URL） |
-| `GET /api/share/received` | 我收到的分享列表（对每个未过期条目动态生成 presigned URL） |
-| `POST /api/share/{id}/save` body: `{destPath}` | 转存：把源对象从分享者 bucket 复制到我的 bucket 的 `vfs/{destPath}`；目标存在则报错不覆盖 |
+| `POST /api/share` body: `{vfsPath, days, convId}` | 校验源文件存在、convId 成员关系；写记录；用分享者凭证对源对象生成 presigned URL 并**存入记录**；返回 `{shareId, url, name, size, expiresAt}` |
+| `GET /api/share/mine` | 我创建的分享列表（返回记录但置空 url 字段） |
+| `GET /api/share/received` | 我收到的分享列表（返回记录含创建时存储的 url，并填充 ownerName 昵称） |
+| `POST /api/share/{id}/save` body: `{destPath}` | 转存：服务端经 presigned URL 拉取源文件流，再流式上传到我的 bucket 的 `vfs/{destPath}/{name}`；目标存在则报错不覆盖 |
 | `DELETE /api/share/{id}` | 发送者删除自己的分享记录（过期条目清理） |
 | `POST /api/share/{id}/dismiss` | 接收者把自己从 receivers 移除（过期条目从"他人共享"清除） |
 
 说明：
 - 所有接口按 accessKey 校验权限：mine 仅 owner 可见；received 仅 receivers 成员可见；save/dismiss 仅 receivers 成员可用
-- presigned URL 每次在 received 列表接口动态生成（MinIO SDK 本地签名，无状态），过期条目不生成
-- 转存使用 MinIO CopySource 跨 bucket 复制；源对象被删除则转存报错提示
+- presigned URL 必须在**创建时**用分享者凭证签名并随记录存储——服务端没有 MinIO root 凭证，无法事后代签；且 MinIO 未配 CORS，浏览器不能直接 fetch 该 URL，故下载走 `<a href>` 直链、转存走服务端拉流
+- 转存未用 CopySource 跨 bucket 复制：服务端无 root 凭证无法同时访问两个 bucket，改为经 presigned URL 拉取 + 流式上传
 
 ## 聊天消息集成
 
 - 新消息类型 `share`：`content` = shareId，`fileName` = 文件名，`fileSize` = 大小
 - 发送流程（ChatView）：工具栏"发送网盘文件"→ 弹框选择文件 + 过期天数 → `POST /api/share` → 拿 shareId 走现有 `sendMessage(convId, shareId, 'share', name, size)` → 现有 WebSocket 推送机制自动送达会话成员
 - 前端收到 share 消息：刷新"他人共享"列表（无需新事件，复用消息触发刷新）
-- 消息卡片渲染（ChatView）：卡片数据源 = "他人共享"列表（发送者侧 = 创建分享时的响应数据）中按 shareId 匹配的条目；匹配不到则显示"分享已失效"
+- 消息卡片渲染（ChatView）：卡片数据源 = useChat 的 `shares` 状态（合并"我的共享"+"他人共享"两个列表，保证发送者自己的卡片也有数据）中按 shareId 匹配的条目；匹配不到则显示"分享已失效"
   - 所有人：文件图标、名称、大小、过期时间/剩余天数
   - 接收者（`msg.sender !== currentUserKey`）：下载、转存按钮
   - 发送者：无操作按钮
@@ -62,10 +64,10 @@
 
 1. **发送弹框**（ChatView 内新组件 `ShareFileModal`）：展示自己网盘的文件树（复用 VFS 列表接口），文件夹可进入不可选中（置灰，提示"请先打包文件夹"）；单选文件；过期天数下拉（1/3/7/30，默认 7）；确认发送
 2. **消息卡片**：见上节
-3. **FileManager · 我的共享**（现有 `my-shares` 导航空壳填充）：表格列 = 名称、类型、大小、共享天数、过期时间、剩余天数、操作；未过期无操作按钮；过期条目置灰 + "删除"按钮（`DELETE /api/share/{id}`）
-4. **FileManager · 他人共享**（现有 `shared-others` 导航空壳填充）：表格列 = 名称、类型、大小、分享者、过期时间、操作；未过期：下载（打开 presigned URL）、转存（弹出目录选择）；过期条目置灰 + "删除"按钮（`dismiss`）
-5. **转存目录选择弹框**：展示自己网盘的目录树（仅文件夹可选），确认后调 `save` 接口，成功后 toast 提示
-6. 切换导航到共享页时加载对应列表（沿用 recent/favorites 的加载模式）
+3. **FileManager · 我的共享**（现有 `my-shares` 导航空壳填充，新组件 `SharesPanel kind="mine"`）：表格列 = 名称、大小、分享时间、过期时间、剩余、操作；未过期无操作按钮；过期条目置灰 + "删除"按钮（`DELETE /api/share/{id}`）
+4. **FileManager · 他人共享**（新组件 `SharesPanel kind="received"`）：表格列 = 名称、大小、分享者、过期时间、剩余、操作；未过期：下载（`<a>` 直链 presigned URL）、转存（弹出目录选择）；过期条目置灰 + "删除"按钮（`dismiss`）
+5. **转存目录选择弹框**（`SaveToModal`，聊天消息卡片与共享列表共用）：展示自己网盘的目录树（仅文件夹可选），确认后调 `save` 接口，成功后 toast 提示
+6. 切换到共享页时 SharesPanel 挂载即加载，并监听 `vfs-changed` 事件刷新（转存成功后同步）
 
 ## 错误处理
 

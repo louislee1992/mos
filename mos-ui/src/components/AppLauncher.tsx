@@ -4,13 +4,17 @@ import iconSvgs from '../data/icons';
 
 interface AppLauncherProps {
   apps: DesktopApp[];
+  hiddenDesktop: Set<string>;
+  onToggleDesktop: (appId: string) => void;
   onOpenApp: (appId: string) => void;
   onClose: () => void;
 }
 
-const AppLauncher: FC<AppLauncherProps> = ({ apps, onOpenApp, onClose }) => {
+const AppLauncher: FC<AppLauncherProps> = ({ apps, hiddenDesktop, onToggleDesktop, onOpenApp, onClose }) => {
   const [query, setQuery] = useState('');
+  const [contextAppId, setContextAppId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -18,11 +22,28 @@ const AppLauncher: FC<AppLauncherProps> = ({ apps, onOpenApp, onClose }) => {
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') {
+        if (contextAppId) {
+          setContextAppId(null);
+        } else {
+          onClose();
+        }
+      }
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [onClose]);
+  }, [onClose, contextAppId]);
+
+  useEffect(() => {
+    if (!contextAppId) return;
+    const handleClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setContextAppId(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [contextAppId]);
 
   const filtered = query.trim()
     ? apps.filter((a) => a.name.toLowerCase().includes(query.toLowerCase()))
@@ -46,22 +67,49 @@ const AppLauncher: FC<AppLauncherProps> = ({ apps, onOpenApp, onClose }) => {
         </div>
 
         <div className="launcher-grid">
-          {filtered.map((app) => (
-            <button
-              key={app.id}
-              className="launcher-item"
-              onClick={() => { onOpenApp(app.id); onClose(); }}
-            >
-              <div className="launcher-item-icon">
-                {iconSvgs[app.icon] || (
-                  <svg viewBox="0 0 64 64" fill="none" style={{ width: '100%', height: '100%' }}>
-                    <rect x="8" y="8" width="48" height="48" rx="4" fill="#667788" />
-                  </svg>
+          {filtered.map((app) => {
+            const isOnDesktop = !hiddenDesktop.has(app.id);
+
+            return (
+              <div key={app.id} className="launcher-item-wrapper">
+                <button
+                  className="launcher-item"
+                  onClick={() => { onOpenApp(app.id); onClose(); }}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setContextAppId(isOnDesktop ? app.id : app.id);
+                  }}
+                >
+                  <div className="launcher-item-icon">
+                    {iconSvgs[app.icon] || (
+                      <svg viewBox="0 0 64 64" fill="none" style={{ width: '100%', height: '100%' }}>
+                        <rect x="8" y="8" width="48" height="48" rx="4" fill="#667788" />
+                      </svg>
+                    )}
+                  </div>
+                  <span className="launcher-item-label">{app.name}</span>
+                  {isOnDesktop && (
+                    <span className="launcher-item-badge" title="已在桌面">
+                      <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+                        <path d="M3 8l3 3 7-7" stroke="#09b83e" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </span>
+                  )}
+                </button>
+
+                {contextAppId === app.id && (
+                  <div className="launcher-context-menu" ref={menuRef}>
+                    <button
+                      className="launcher-context-item"
+                      onClick={() => { onToggleDesktop(app.id); setContextAppId(null); }}
+                    >
+                      {isOnDesktop ? '从桌面移除' : '添加到桌面'}
+                    </button>
+                  </div>
                 )}
               </div>
-              <span className="launcher-item-label">{app.name}</span>
-            </button>
-          ))}
+            );
+          })}
           {filtered.length === 0 && (
             <div className="launcher-empty">未找到匹配的应用</div>
           )}

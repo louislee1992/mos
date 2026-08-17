@@ -19,8 +19,8 @@ function formatTime(ts: number): string {
   return new Date(ts).toLocaleString('zh-CN');
 }
 
-const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }) => {
-  const [activeTab, setActiveTab] = useState<TabId>('account');
+const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings, initialTab }) => {
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab === 'theme' ? 'theme' : 'account');
   const [accounts, setAccounts] = useState<AccountEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [deviceInfo, setDeviceInfo] = useState<DeviceInfo | null>(null);
@@ -75,10 +75,9 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
         try {
           const key = cw.key.replace('config/', '');
           const creds = getCredentials();
-          const res = await fetch(`${creds.endpoint}/api/config/${encodeURIComponent(key)}`, {
+          const res = await fetch(`/api/config/download?key=${encodeURIComponent(key)}`, {
             headers: {
-              'Authorization': 'Basic ' + btoa(`${creds.accessKey}:${creds.secretKey}`),
-              'X-Minio-Endpoint': creds.endpoint,
+              'Authorization': 'Basic ' + btoa(`${creds.accessKey}:${creds.secretKey}`)
             },
           });
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -149,13 +148,13 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
   const activeBtnStyle = (isActive: boolean) => ({
     padding: '6px 16px',
     border: isActive
-      ? '1px solid rgba(66,133,244,0.6)'
-      : '1px solid rgba(255,255,255,0.1)',
+      ? '1px solid var(--border-focus)'
+      : '1px solid var(--border-default)',
     borderRadius: 6,
     background: isActive
-      ? 'rgba(66,133,244,0.15)'
-      : 'rgba(255,255,255,0.04)',
-    color: isActive ? '#8ab4f8' : '#aaa',
+      ? 'var(--accent-bg)'
+      : 'var(--bg-surface)',
+    color: isActive ? 'var(--accent-text)' : 'var(--text-muted)',
     cursor: 'pointer',
     fontSize: 13,
   });
@@ -171,7 +170,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
       <circle cx="12" cy="12" r="12" fill="white" />
       <path
         d="M7 12l3 3 7-7"
-        stroke="#4285f4"
+        stroke="var(--accent)"
         strokeWidth="2"
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -219,7 +218,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
               style={{
                 margin: '0 0 16px',
                 fontSize: 16,
-                color: '#e0e0e0',
+                color: 'var(--text-primary)',
                 fontWeight: 600,
               }}
             >
@@ -227,11 +226,11 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
             </h2>
 
             {loading && (
-              <p style={{ color: '#888', fontSize: 14 }}>加载中...</p>
+              <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>加载中...</p>
             )}
 
             {!loading && !currentAccount && (
-              <p style={{ color: '#888', fontSize: 14 }}>暂无账号信息</p>
+              <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>暂无账号信息</p>
             )}
 
             {!loading && currentAccount && (
@@ -240,12 +239,6 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                   <div className="settings-info-label">用户名</div>
                   <div className="settings-info-value">
                     {currentAccount.name}
-                  </div>
-                </div>
-                <div className="settings-info-item">
-                  <div className="settings-info-label">MinIO 地址</div>
-                  <div className="settings-info-value">
-                    {currentAccount.endpoint}
                   </div>
                 </div>
                 <div className="settings-info-item">
@@ -278,7 +271,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
               style={{
                 margin: '0 0 16px',
                 fontSize: 16,
-                color: '#e0e0e0',
+                color: 'var(--text-primary)',
                 fontWeight: 600,
               }}
             >
@@ -287,7 +280,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
 
             {/* Theme mode */}
             <div className="settings-info-card">
-              <div style={{ marginBottom: 12, fontSize: 13, color: '#ccc' }}>
+              <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-secondary)' }}>
                 主题模式
               </div>
               <div style={{ display: 'flex', gap: 8 }}>
@@ -309,7 +302,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
 
             {/* Wallpaper */}
             <div className="settings-info-card">
-              <div style={{ marginBottom: 12, fontSize: 13, color: '#ccc' }}>
+              <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-secondary)' }}>
                 壁纸
               </div>
 
@@ -363,7 +356,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                             borderRadius: 6,
                             background: wp.background,
                             border: selected
-                              ? '2px solid #4285f4'
+                              ? '2px solid var(--accent)'
                               : '2px solid transparent',
                             position: 'relative',
                             overflow: 'hidden',
@@ -374,7 +367,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                         <div
                           style={{
                             fontSize: 12,
-                            color: '#aaa',
+                            color: 'var(--text-muted)',
                             marginTop: 4,
                             textAlign: 'center',
                           }}
@@ -409,7 +402,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                             borderRadius: '50%',
                             background: color,
                             border: selected
-                              ? '2px solid #4285f4'
+                              ? '2px solid var(--accent)'
                               : '2px solid transparent',
                             cursor: 'pointer',
                             position: 'relative',
@@ -473,9 +466,9 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                         padding: '6px 10px',
                         fontSize: 13,
                         borderRadius: 4,
-                        border: '1px solid rgba(255,255,255,0.1)',
-                        background: 'rgba(255,255,255,0.04)',
-                        color: '#ccc',
+                        border: '1px solid var(--border-default)',
+                        background: 'var(--bg-input)',
+                        color: 'var(--text-secondary)',
                         width: 100,
                         outline: 'none',
                       }}
@@ -502,7 +495,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                       return (
                         <div
                           key={cw.id}
-                          style={{ position: 'relative', cursor: 'pointer' }}
+                          style={{ position: 'relative', cursor: 'pointer', minWidth: 0, overflow: 'hidden' }}
                         >
                           <div
                             onClick={() =>
@@ -516,13 +509,13 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                               paddingBottom: '62.5%',
                               borderRadius: 6,
                               border: selected
-                                ? '2px solid #4285f4'
+                                ? '2px solid var(--accent)'
                                 : '2px solid transparent',
                               overflow: 'hidden',
                               position: 'relative',
                               background: thumbUrl
                                 ? `url(${thumbUrl}) center/cover no-repeat`
-                                : 'rgba(255,255,255,0.05)',
+                                : 'var(--bg-surface)',
                             }}
                           >
                             {selected && checkmarkSvg}
@@ -558,8 +551,8 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                           <div
                             style={{
                               fontSize: 11,
-                              color: '#888',
-                              marginTop: 2,
+                              color: 'var(--text-muted)',
+                              marginTop: 4,
                               textAlign: 'center',
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
@@ -579,7 +572,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                         width: '100%',
                         paddingBottom: '62.5%',
                         borderRadius: 6,
-                        border: '2px dashed rgba(255,255,255,0.15)',
+                        border: '2px dashed var(--border-default)',
                         cursor: 'pointer',
                         position: 'relative',
                       }}
@@ -591,7 +584,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                           left: '50%',
                           transform: 'translate(-50%, -50%)',
                           fontSize: 24,
-                          color: 'rgba(255,255,255,0.3)',
+                          color: 'var(--text-muted)',
                         }}
                       >
                         +
@@ -619,7 +612,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
               style={{
                 margin: '0 0 16px',
                 fontSize: 16,
-                color: '#e0e0e0',
+                color: 'var(--text-primary)',
                 fontWeight: 600,
               }}
             >
@@ -627,12 +620,12 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
             </h2>
 
             <div className="settings-info-card">
-              <div style={{ marginBottom: 12, fontSize: 13, color: '#ccc' }}>
+              <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-secondary)' }}>
                 当前设备
               </div>
 
               {deviceInfoLoading && (
-                <p style={{ color: '#888', fontSize: 14 }}>加载中...</p>
+                <p style={{ color: 'var(--text-muted)', fontSize: 14 }}>加载中...</p>
               )}
 
               {!deviceInfoLoading && deviceInfo && (
@@ -662,7 +655,7 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
             {currentAccount && (
               <div className="settings-info-card">
                 <div
-                  style={{ marginBottom: 12, fontSize: 13, color: '#ccc' }}
+                  style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-secondary)' }}
                 >
                   登录历史
                 </div>
@@ -670,12 +663,6 @@ const MyAccount: FC<MyAccountProps> = ({ accessKey, settings, onUpdateSettings }
                   <div className="settings-info-label">最近登录</div>
                   <div className="settings-info-value">
                     {formatTime(currentAccount.lastUsedAt)}
-                  </div>
-                </div>
-                <div className="settings-info-item">
-                  <div className="settings-info-label">登录节点</div>
-                  <div className="settings-info-value">
-                    {currentAccount.endpoint}
                   </div>
                 </div>
               </div>

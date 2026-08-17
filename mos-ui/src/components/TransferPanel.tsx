@@ -1,4 +1,4 @@
-import { type FC, useEffect, useRef } from 'react';
+import { type FC, type CSSProperties } from 'react';
 import type { TransferTask } from '../hooks/useTransfers';
 
 function formatSize(bytes: number): string {
@@ -43,24 +43,14 @@ interface TransferPanelProps {
   tasks: TransferTask[];
   onClose: () => void;
   onClearCompleted: () => void;
+  style?: CSSProperties;
 }
 
-const TransferPanel: FC<TransferPanelProps> = ({ tasks, onClose, onClearCompleted }) => {
-  const panelRef = useRef<HTMLDivElement>(null);
+const TransferPanel: FC<TransferPanelProps> = ({ tasks, onClose, onClearCompleted, style }) => {
   const hasCompleted = tasks.some((t) => t.status !== 'transferring');
 
-  useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
-      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [onClose]);
-
   return (
-    <div className="transfer-panel" ref={panelRef}>
+    <div className="transfer-panel" style={style}>
       <div className="transfer-panel-header">
         <span className="transfer-panel-title">文件任务</span>
         <div className="transfer-panel-header-actions">
@@ -76,6 +66,15 @@ const TransferPanel: FC<TransferPanelProps> = ({ tasks, onClose, onClearComplete
               </svg>
             </button>
           )}
+          <button
+            className="transfer-panel-close-btn"
+            onClick={onClose}
+            title="关闭"
+          >
+            <svg viewBox="0 0 12 12" width="10" height="10" fill="none">
+              <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+            </svg>
+          </button>
         </div>
       </div>
 
@@ -98,24 +97,24 @@ const TransferPanel: FC<TransferPanelProps> = ({ tasks, onClose, onClearComplete
                     {task.fileName}
                   </span>
                   <span className="transfer-item-pct">
-                    {task.status === 'failed' ? '失败' : task.status === 'completed' ? '完成' : `${pct}%`}
+                    {task.status === 'failed' ? '失败' : task.status === 'completed' ? '完成' : task.writingToStorage ? '正在写入存储…' : `${pct}%`}
                   </span>
                 </div>
 
                 <div className="transfer-item-bar-track">
                   <div
-                    className={`transfer-item-bar-fill transfer-item-bar-${task.status}`}
-                    style={{ width: `${pct}%` }}
+                    className={`transfer-item-bar-fill transfer-item-bar-${task.status}${task.writingToStorage ? ' transfer-item-bar-writing' : ''}`}
+                    style={{ width: task.writingToStorage ? '100%' : `${pct}%` }}
                   />
                 </div>
 
                 <div className="transfer-item-meta">
                   <span className="transfer-item-direction">
-                    {task.direction === 'upload' ? '上传' : task.direction === 'download' ? '下载' : '移动'}
+                    {task.direction === 'upload' ? '↑ 上传' : task.direction === 'download' ? '↓ 下载' : '→ 移动'}
                   </span>
-                  {task.direction === 'move' && task.vfsPath ? (
-                    <span className="transfer-item-dest" title={`vfs/${task.vfsPath}`}>
-                      至: {task.vfsPath}
+                  {task.direction === 'move' ? (
+                    <span className="transfer-item-dest" title={`${task.sourcePath ?? ''} → ${task.destPath ?? task.vfsPath}`}>
+                      {task.sourcePath ? `${task.sourcePath} → ${task.destPath || task.vfsPath}` : task.destPath || task.vfsPath}
                     </span>
                   ) : (
                     <span className="transfer-item-size">

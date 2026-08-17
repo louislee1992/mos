@@ -37,6 +37,12 @@ function insertTrashPath(children: TrashNode[], segments: string[], entry: Trash
         trashKey: entry.trashKey,
         originalPath: entry.originalPath,
       });
+    } else if (entry.trashKey) {
+      existing.trashKey = entry.trashKey;
+      existing.originalPath = entry.originalPath;
+      existing.deletedAt = entry.deletedAt;
+      existing.isDirectory = entry.isDirectory;
+      existing.size = entry.size;
     }
     return;
   }
@@ -60,6 +66,7 @@ function buildTrashTree(entries: TrashEntry[]): TrashNode[] {
   const root: TrashNode[] = [];
   for (const entry of entries) {
     const path = entry.originalPath;
+    if (!path) continue;
     const segments = path.split('/').filter(s => s !== '');
     if (segments.length === 0) continue;
     insertTrashPath(root, segments, entry, path);
@@ -194,12 +201,12 @@ interface CtxMenu {
 }
 
 const RecycleBin: FC = () => {
-  const [selectedPath, setSelectedPath] = useState<string[]>(['回收站']);
+  const [selectedPath, setSelectedPath] = useState<string[]>(['我的文件']);
   const [searchQuery, setSearchQuery] = useState('');
-  const [trashTree, setTrashTree] = useState<TrashNode[]>([{ name: '回收站', isDirectory: true, size: 0, deletedAt: '', children: [], trashKey: '', originalPath: '' }]);
+  const [trashTree, setTrashTree] = useState<TrashNode[]>([{ name: '我的文件', isDirectory: true, size: 0, deletedAt: '', children: [], trashKey: '', originalPath: '' }]);
   const [ctxMenu, setCtxMenu] = useState<CtxMenu>({ x: 0, y: 0, visible: false });
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set(['回收站']));
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set(['我的文件']));
   const [expandedMainDirs, setExpandedMainDirs] = useState<Set<string>>(new Set());
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -214,8 +221,11 @@ const RecycleBin: FC = () => {
   const resizeRef = useRef<{ col: string; startX: number; startW: number } | null>(null);
   const [resizing, setResizing] = useState<string | null>(null);
 
-  // confirm modal: 'delete' | 'empty' | null
-  const [confirmAction, setConfirmAction] = useState<'delete' | 'empty' | null>(null);
+  // confirm modal: 'delete' | 'empty' | 'single' | null
+  const [confirmAction, setConfirmAction] = useState<'delete' | 'empty' | 'single' | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [ctxMenuNode, setCtxMenuNode] = useState<TrashNode | null>(null);
+  const [singleDeleteNode, setSingleDeleteNode] = useState<TrashNode | null>(null);
 
   const handleResizeStart = (col: string, e: React.MouseEvent) => {
     e.preventDefault();
@@ -250,7 +260,7 @@ const RecycleBin: FC = () => {
         trashKey: r.trashPath || '',
       }));
       const tree = buildTrashTree(entries);
-      setTrashTree([{ name: '回收站', isDirectory: true, size: 0, deletedAt: '', children: tree, trashKey: '', originalPath: '' }]);
+      setTrashTree([{ name: '我的文件', isDirectory: true, size: 0, deletedAt: '', children: tree, trashKey: '', originalPath: '' }]);
       setSelectedItems(new Set());
     } catch (e) {
       console.warn('[RecycleBin] loadTrash failed:', e);
@@ -263,6 +273,7 @@ const RecycleBin: FC = () => {
   useEffect(() => {
     const close = (e: MouseEvent) => {
       setCtxMenu((c) => (c.visible ? { ...c, visible: false } : c));
+      setCtxMenuNode(null);
       if (sortRef.current && !sortRef.current.contains(e.target as Node)) setShowSortMenu(false);
     };
     window.addEventListener('click', close);
@@ -289,7 +300,7 @@ const RecycleBin: FC = () => {
   useEffect(() => {
     setExpandedPaths(prev => {
       const next = new Set(prev);
-      next.add('回收站');
+      next.add('我的文件');
       for (let i = 1; i < selectedPath.length; i++) {
         next.add(selectedPath.slice(0, i + 1).join('/'));
       }
@@ -298,6 +309,7 @@ const RecycleBin: FC = () => {
   }, [selectedPath]);
 
   const handleRestore = async () => {
+    setBusy(true);
     try {
       const items = [...selectedItems].map(p => findNodeByRelPath(currentChildren, p)).filter(Boolean) as TrashNode[];
       for (const item of items) {
@@ -309,6 +321,8 @@ const RecycleBin: FC = () => {
       loadTrash();
     } catch (e) {
       console.warn('[RecycleBin] restore failed:', e);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -318,6 +332,7 @@ const RecycleBin: FC = () => {
   };
 
   const handlePermanentDeleteConfirm = async () => {
+    setBusy(true);
     try {
       const items = [...selectedItems].map(p => findNodeByRelPath(currentChildren, p)).filter(Boolean) as TrashNode[];
       for (const item of items) {
@@ -330,6 +345,8 @@ const RecycleBin: FC = () => {
       loadTrash();
     } catch (e) {
       console.warn('[RecycleBin] permanent delete failed:', e);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -339,6 +356,7 @@ const RecycleBin: FC = () => {
   };
 
   const handleEmptyTrashConfirm = async () => {
+    setBusy(true);
     try {
       const allNodes = collectAllNodes(trashTree[0]?.children || []);
       for (const node of allNodes) {
@@ -351,6 +369,8 @@ const RecycleBin: FC = () => {
       loadTrash();
     } catch (e) {
       console.warn('[RecycleBin] empty trash failed:', e);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -360,7 +380,7 @@ const RecycleBin: FC = () => {
 
   // ── context menu ──
 
-  const handleContextMenu = (e: React.MouseEvent) => {
+  const handleContextMenu = (e: React.MouseEvent, node?: TrashNode) => {
     e.preventDefault();
     const rect = contentRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -372,7 +392,44 @@ const RecycleBin: FC = () => {
     if (sy + menuH > window.innerHeight) sy = e.clientY - menuH;
     if (sx < 0) sx = 0;
     if (sy < 0) sy = 0;
-    setCtxMenu({ x: sx - rect.left, y: sy - rect.top, visible: true });
+    setCtxMenu({ x: sx, y: sy, visible: true });
+    setCtxMenuNode(node || null);
+  };
+
+  const handleCtxRestore = async () => {
+    if (!ctxMenuNode || !ctxMenuNode.trashKey) return;
+    setBusy(true);
+    try {
+      await apiPost('/api/trash/restore', { trashPath: ctxMenuNode.trashKey, originalPath: ctxMenuNode.originalPath });
+      setCtxMenuNode(null);
+      loadTrash();
+    } catch (e) {
+      console.warn('[RecycleBin] restore failed:', e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCtxPermanentDelete = () => {
+    if (!ctxMenuNode) return;
+    setSingleDeleteNode(ctxMenuNode);
+    setConfirmAction('single');
+  };
+
+  const handleSingleDeleteConfirm = async () => {
+    if (!singleDeleteNode || !singleDeleteNode.trashKey) return;
+    setBusy(true);
+    try {
+      await apiDelete(`/api/trash?trashPath=${encodeURIComponent(singleDeleteNode.trashKey)}`);
+      setSingleDeleteNode(null);
+      setConfirmAction(null);
+      setCtxMenuNode(null);
+      loadTrash();
+    } catch (e) {
+      console.warn('[RecycleBin] single permanent delete failed:', e);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const ctxItems = [
@@ -384,7 +441,8 @@ const RecycleBin: FC = () => {
           <path d="M14 2v4h-4M2 14v-4h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       ),
-      action: () => { setSelectedItems(new Set()); loadTrash(); },
+      action: () => { setSelectedItems(new Set()); setCtxMenuNode(null); loadTrash(); },
+      disabled: false,
     },
     {
       label: '还原',
@@ -394,7 +452,8 @@ const RecycleBin: FC = () => {
           <path d="M2 2v4h4M14 14v-4h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       ),
-      action: handleRestore,
+      action: handleCtxRestore,
+      disabled: !ctxMenuNode?.trashKey,
     },
     {
       label: '彻底删除',
@@ -404,7 +463,8 @@ const RecycleBin: FC = () => {
           <path d="M2 4h12M6 4V3a1 1 0 011-1h2a1 1 0 011 1v1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
         </svg>
       ),
-      action: handlePermanentDeleteClick,
+      action: handleCtxPermanentDelete,
+      disabled: !ctxMenuNode?.trashKey,
     },
   ];
 
@@ -412,13 +472,23 @@ const RecycleBin: FC = () => {
     <div className="fm-container">
       {/* ===== Confirm Modal ===== */}
       {confirmAction && (
-        <div className="fm-modal-overlay" onClick={() => setConfirmAction(null)}>
+        <div className="fm-modal-overlay" onClick={() => { if (!busy) { setConfirmAction(null); setSingleDeleteNode(null); } }}>
           <div className="fm-modal" onClick={(e) => e.stopPropagation()}>
             <div className="fm-modal-header">
-              {confirmAction === 'delete' ? '确认彻底删除' : '确认清空回收站'}
+              {confirmAction === 'delete' || confirmAction === 'single' ? '确认彻底删除' : '确认清空回收站'}
             </div>
             <div className="fm-modal-body" style={{ color: 'var(--text-secondary)', fontSize: '0.875rem', lineHeight: 1.6 }}>
-              {confirmAction === 'delete' ? (
+              {confirmAction === 'single' && singleDeleteNode ? (
+                <>
+                  <p>确定要彻底删除以下项目吗？此操作<strong style={{ color: 'var(--error)' }}>不可恢复</strong>。</p>
+                  <div style={{ marginTop: '0.5rem' }}>
+                    <div style={{ padding: '0.125rem 0', display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
+                      {singleDeleteNode.isDirectory ? <IconFolder /> : <IconFile />}
+                      <span>{singleDeleteNode.name}</span>
+                    </div>
+                  </div>
+                </>
+              ) : confirmAction === 'delete' ? (
                 <>
                   <p>确定要彻底删除以下 {deleteTargets.length} 个{deleteTargets.length === 1 ? '项' : '项'}吗？此操作<strong style={{ color: 'var(--error)' }}>不可恢复</strong>。</p>
                   <div style={{ marginTop: '0.5rem', maxHeight: 120, overflowY: 'auto' }}>
@@ -435,12 +505,23 @@ const RecycleBin: FC = () => {
               )}
             </div>
             <div className="fm-modal-footer">
-              <button onClick={() => setConfirmAction(null)} className="fm-modal-btn fm-modal-btn-cancel">取消</button>
+              <button onClick={() => { setConfirmAction(null); setSingleDeleteNode(null); }} disabled={busy} className="fm-modal-btn fm-modal-btn-cancel">取消</button>
               <button
-                onClick={confirmAction === 'delete' ? handlePermanentDeleteConfirm : handleEmptyTrashConfirm}
+                onClick={() => {
+                  if (confirmAction === 'single') handleSingleDeleteConfirm();
+                  else if (confirmAction === 'delete') handlePermanentDeleteConfirm();
+                  else handleEmptyTrashConfirm();
+                }}
+                disabled={busy}
                 className="fm-modal-btn fm-modal-btn-danger"
+                style={{ display: 'flex', alignItems: 'center', gap: '0.375rem', justifyContent: 'center' }}
               >
-                {confirmAction === 'delete' ? '彻底删除' : '清空回收站'}
+                {busy && (
+                  <svg viewBox="0 0 16 16" width="14" height="14" fill="none" className="transfer-spinner">
+                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" strokeDasharray="28" strokeLinecap="round" />
+                  </svg>
+                )}
+                {busy ? '处理中…' : '彻底删除'}
               </button>
             </div>
           </div>
@@ -479,7 +560,7 @@ const RecycleBin: FC = () => {
             </button>
             <div className="fm-toolbar-sep" />
             <div className="fm-breadcrumb">
-              <button onClick={() => setSelectedPath(['回收站'])} className="fm-breadcrumb-item">
+              <button onClick={() => setSelectedPath(['我的文件'])} className="fm-breadcrumb-item">
                 <svg viewBox="0 0 20 20" width="14" height="14" fill="none">
                   <path d="M4 5h12l-1 11a1 1 0 01-1 1H6a1 1 0 01-1-1L4 5z" stroke="currentColor" strokeWidth="1.3" />
                   <path d="M3 5h14M7 5V3.5A1.5 1.5 0 018.5 2h3A1.5 1.5 0 0113 3.5V5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
@@ -520,14 +601,20 @@ const RecycleBin: FC = () => {
             <button
               className={`fm-action-btn${selectedItems.size === 0 ? ' fm-action-btn-disabled' : ''}`}
               onClick={handleRestore}
-              disabled={selectedItems.size === 0}
+              disabled={selectedItems.size === 0 || busy}
               title="还原"
             >
-              <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
-                <path d="M2 8a6 6 0 0111.3-3.3M14 8a6 6 0 01-11.3 3.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                <path d="M2 2v4h4M14 14v-4h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              <span>还原</span>
+              {busy ? (
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" className="transfer-spinner">
+                  <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" strokeDasharray="28" strokeLinecap="round" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                  <path d="M2 8a6 6 0 0111.3-3.3M14 8a6 6 0 01-11.3 3.3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <path d="M2 2v4h4M14 14v-4h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+              <span>{busy ? '还原中…' : '还原'}</span>
             </button>
             <button
               className={`fm-action-btn${selectedItems.size === 0 ? ' fm-action-btn-disabled' : ''}`}
@@ -630,7 +717,7 @@ const RecycleBin: FC = () => {
         <div
           className="fm-content"
           ref={contentRef}
-          onContextMenu={handleContextMenu}
+          onContextMenu={(e) => handleContextMenu(e)}
         >
           {currentChildren.length === 0 ? (
             <div className="fm-empty">回收站为空</div>
@@ -706,6 +793,7 @@ const RecycleBin: FC = () => {
                           });
                         }}
                         className={`fm-file-row${isSel ? ' fm-file-row-selected' : ''}`}
+                        onContextMenu={(e) => { e.stopPropagation(); handleContextMenu(e, node); }}
                       >
                         <span className="fm-col-name" style={{ paddingLeft: 8 + depth * 16 }}>
                           <span className={`fm-tree-arrow${hasChildren ? '' : ' fm-tree-arrow-empty'}`} onClick={(e) => {
@@ -749,9 +837,11 @@ const RecycleBin: FC = () => {
               {ctxItems.map((item) => (
                 <button
                   key={item.label}
-                  className="fm-ctxmenu-item"
+                  className={`fm-ctxmenu-item${item.disabled ? ' fm-ctxmenu-item-disabled' : ''}`}
+                  disabled={item.disabled}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (item.disabled) return;
                     setCtxMenu({ ...ctxMenu, visible: false });
                     item.action();
                   }}

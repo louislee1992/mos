@@ -29,6 +29,10 @@ export function loadMessages(convId: string) {
   return apiGet<ChatMessage[]>(`/api/chat/conversations/${convId}/messages`);
 }
 
+export function markConversationRead(convId: string) {
+  return apiPost<{ ok: boolean }>(`/api/chat/conversations/${convId}/read`, {});
+}
+
 export function sendMessage(convId: string, content: string, msgType = 'text', fileName?: string, fileSize?: number) {
   return apiPost<ChatMessage>(`/api/chat/conversations/${convId}/messages`, {
     content, msgType, fileName, fileSize,
@@ -49,6 +53,10 @@ export function uploadChatFile(file: File, convId: string) {
 
 export function sendCloudFile(convId: string, vfsPath: string, fileName: string) {
   return apiPost<{ s3Key: string }>('/api/chat/cloud-file', { convId, vfsPath, fileName });
+}
+
+export function saveChatFileToVfs(s3Key: string, destPath: string) {
+  return apiPost<{ ok: boolean }>('/api/chat/save-to-vfs', { s3Key, destPath });
 }
 
 export function getSavedServer() {

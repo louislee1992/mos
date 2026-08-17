@@ -1,4 +1,4 @@
-import { type FC, useState, useCallback, useEffect } from 'react';
+import { type FC, useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { verifyCredentials } from '../api/auth';
 import { setCredentials } from '../api/client';
@@ -6,7 +6,6 @@ import { setCredentials } from '../api/client';
 interface AccountEntry {
   id: string;
   name: string;
-  endpoint: string;
   accessKey: string;
   secretKey: string;
   isAdmin: boolean;
@@ -63,27 +62,18 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [showForm, setShowForm] = useState(false);
   const [timeStr, setTimeStr] = useState(getTimeString);
   const [dateStr] = useState(getDateString);
-  const [endpoint, setEndpoint] = useState('http://');
   const [accessKey, setAccessKey] = useState('');
   const [secretKey, setSecretKey] = useState('');
   const [showSecret, setShowSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [accounts, setAccounts] = useState<AccountEntry[]>(loadAccounts);
-  const [endpointFocused, setEndpointFocused] = useState(false);
-  const [endpointSuggestions, setEndpointSuggestions] = useState<string[]>([]);
+  const accountsRef = useRef(accounts);
+  accountsRef.current = accounts;
 
-  const uniqueEndpoints = [...new Set(accounts.map((a) => a.endpoint))];
 
-  const filterEndpointSuggestions = (input: string) => {
-    if (!input.trim()) {
-      setEndpointSuggestions(uniqueEndpoints);
-    } else {
-      setEndpointSuggestions(
-        uniqueEndpoints.filter((ep) => ep.toLowerCase().includes(input.toLowerCase())),
-      );
-    }
-  };
+
+
 
   useEffect(() => {
     const timer = setInterval(() => setTimeStr(getTimeString()), 1000);
@@ -105,41 +95,30 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [showForm]);
 
-  const doLogin = useCallback(async (ep: string, ak: string, sk: string) => {
+  const doLogin = useCallback(async (ak: string, sk: string) => {
     setError(null);
     setLoading(true);
     try {
-      await verifyCredentials(ep, ak, sk);
-      setCredentials(ep, ak, sk);
+      await verifyCredentials(ak, sk);
+      setCredentials(ak, sk);
 
       const now = Date.now();
-      let host = ep;
-      try {
-        host = new URL(ep).host;
-      } catch {
-        /* keep raw */
-      }
-      setAccounts((prev) => {
-        const existing = prev.find(
-          (a) => a.endpoint === ep && a.accessKey === ak,
-        );
-        const entry: AccountEntry = {
-          id: existing?.id ?? crypto.randomUUID(),
-          name: `MinIO @ ${host}`,
-          endpoint: ep,
-          accessKey: ak,
-          secretKey: sk,
-          isAdmin: existing?.isAdmin ?? false,
-          createdAt: existing?.createdAt ?? now,
-          lastUsedAt: now,
-        };
-        const updated = prev.filter(
-          (a) => !(a.endpoint === ep && a.accessKey === ak),
-        );
-        updated.push(entry);
-        saveAccounts(updated);
-        return updated;
-      });
+      const prev = accountsRef.current;
+      const existing = prev.find((a) => a.accessKey === ak);
+      const entry: AccountEntry = {
+        id: existing?.id ?? crypto.randomUUID(),
+        name: `MOS · ${ak}`,
+        accessKey: ak,
+        secretKey: sk,
+        isAdmin: existing?.isAdmin ?? false,
+        createdAt: existing?.createdAt ?? now,
+        lastUsedAt: now,
+      };
+      const updated = prev.filter((a) => a.accessKey !== ak);
+      updated.push(entry);
+
+      saveAccounts(updated);
+      setAccounts(updated);
       onLoginSuccess(ak);
     } catch (err) {
       setError(err instanceof Error ? err.message : '连接失败');
@@ -151,9 +130,9 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      await doLogin(endpoint.trim(), accessKey.trim(), secretKey.trim());
+      await doLogin(accessKey.trim(), secretKey.trim());
     },
-    [endpoint, accessKey, secretKey, doLogin],
+    [accessKey, secretKey, doLogin],
   );
 
   const handleDeleteAccount = useCallback((id: string) => {
@@ -163,17 +142,14 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   }, [accounts]);
 
   const handleSelectAccount = useCallback((acc: AccountEntry) => {
-    setEndpoint(acc.endpoint);
-    setAccessKey(acc.accessKey);
-    setSecretKey(acc.secretKey);
-    setError(null);
-  }, []);
+    doLogin(acc.accessKey, acc.secretKey);
+  }, [doLogin]);
 
   const sortedAccounts = [...accounts].sort((a, b) => b.lastUsedAt - a.lastUsedAt);
 
   return (
     <div
-      className="relative h-screen w-screen overflow-hidden"
+      className="login-screen"
       style={{ background: 'linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%)' }}
       onClick={() => !showForm && setShowForm(true)}
     >
@@ -181,15 +157,15 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
       <AnimatePresence>
         {!showForm && (
           <motion.div
-            className="absolute inset-0 flex flex-col items-center justify-center select-none"
+            className="login-lockscreen"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0, y: -30, transition: { duration: 0.3 } }}
           >
-            <h1 className="text-[80px] font-light text-white tracking-tight leading-none mb-1">
+            <h1 className="login-clock">
               {timeStr}
             </h1>
-            <p className="text-white/70 text-lg">{dateStr}</p>
+            <p className="login-date">{dateStr}</p>
           </motion.div>
         )}
       </AnimatePresence>
@@ -198,13 +174,13 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
       <AnimatePresence>
         {showForm && (
           <motion.div
-            className="absolute inset-0 flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm"
+            className="login-form-overlay"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
           >
             <motion.div
-              className="flex flex-col gap-5 p-10 rounded-xl w-[400px]"
+              className="login-card"
               style={{
                 background: 'rgba(22,22,42,0.9)',
                 backdropFilter: 'blur(24px)',
@@ -216,31 +192,23 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
               transition={{ duration: 0.3, ease: 'easeOut' }}
             >
               {/* 头像 */}
-              <div className="flex flex-col items-center gap-3">
-                <div className="w-20 h-20 rounded-full bg-white/10 flex items-center justify-center border-2 border-white/20">
-                  <svg viewBox="0 0 24 24" fill="none" width="40" height="40">
-                    <circle cx="12" cy="9" r="4" stroke="white" strokeWidth="1.5" fill="none" />
-                    <path d="M4 21C4 17 7.5 14.5 12 14.5C16.5 14.5 20 17 20 21"
-                      stroke="white" strokeWidth="1.5" strokeLinecap="round" fill="none" />
-                  </svg>
-                </div>
-                <h2 className="text-xl font-semibold text-white">mos</h2>
+              <div className="login-avatar-row">
+                <h2 className="login-title">MOS云桌面</h2>
               </div>
 
               {/* 已保存账户 */}
               {sortedAccounts.length > 0 && (
-                <div className="flex items-center gap-2 flex-wrap justify-center">
+                <div className="login-accounts-row">
                   {sortedAccounts.map((acc) => (
-                    <div key={acc.id} className="relative group">
+                    <div key={acc.id} className="login-account-wrapper">
                       <button
                         type="button"
                         onClick={() => handleSelectAccount(acc)}
-                        className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium text-white
-                                   border-2 border-white/20 hover:border-white/40 transition-colors cursor-pointer"
+                        className="login-account-btn"
                         style={{ backgroundColor: getAccountColor(acc.id) }}
                         title={acc.name}
                       >
-                        {acc.name.charAt(0).toUpperCase()}
+                        {acc.accessKey.charAt(0).toUpperCase()}
                       </button>
                       <button
                         type="button"
@@ -249,9 +217,7 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                           e.stopPropagation();
                           handleDeleteAccount(acc.id);
                         }}
-                        className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-500/80 text-white
-                                   flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100
-                                   transition-opacity cursor-pointer hover:bg-red-500 disabled:opacity-30"
+                        className="login-account-delete"
                       >
                         &#x00D7;
                       </button>
@@ -261,77 +227,26 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
               )}
 
               {/* 表单 */}
-              <form onSubmit={handleSubmit} className="flex flex-col gap-3.5">
-                <div className="relative">
-                  <input
-                    type="text"
-                    value={endpoint}
-                    onChange={(e) => {
-                      setEndpoint(e.target.value);
-                      filterEndpointSuggestions(e.target.value);
-                    }}
-                    onFocus={() => {
-                      setEndpointFocused(true);
-                      filterEndpointSuggestions(endpoint);
-                    }}
-                    onBlur={() => {
-                      // Delay hiding so click on suggestion registers
-                      setTimeout(() => setEndpointFocused(false), 150);
-                    }}
-                    placeholder="http://127.0.0.1:9000"
-                    className="w-full px-3 py-2.5 rounded-md text-sm text-white outline-none bg-white/8
-                               border border-white/10 focus:border-blue-400/60 focus:bg-white/12 transition-colors"
-                  />
-                  {/* endpoint 自动补全建议 */}
-                  {endpointFocused && endpointSuggestions.length > 0 && (
-                    <div
-                      className="absolute z-10 top-full left-0 right-0 mt-1 rounded-md overflow-hidden"
-                      style={{
-                        background: 'rgba(30,30,55,0.95)',
-                        border: '1px solid rgba(255,255,255,0.1)',
-                        backdropFilter: 'blur(12px)',
-                      }}
-                    >
-                      {endpointSuggestions.map((ep) => (
-                        <button
-                          key={ep}
-                          type="button"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            setEndpoint(ep);
-                            setEndpointFocused(false);
-                          }}
-                          className="w-full text-left px-3 py-2 text-sm text-white/80 hover:bg-white/10
-                                     transition-colors cursor-pointer"
-                        >
-                          {ep}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
+              <form onSubmit={handleSubmit} className="login-form">
                 <input
                   type="text"
                   value={accessKey}
                   onChange={(e) => setAccessKey(e.target.value)}
                   placeholder="Access Key"
-                  className="w-full px-3 py-2.5 rounded-md text-sm text-white outline-none bg-white/8
-                             border border-white/10 focus:border-blue-400/60 focus:bg-white/12 transition-colors"
+                  className="login-input"
                 />
-                <div className="relative">
+                <div className="login-field-wrapper">
                   <input
                     type={showSecret ? 'text' : 'password'}
                     value={secretKey}
                     onChange={(e) => setSecretKey(e.target.value)}
                     placeholder="Secret Key"
-                    className="w-full px-3 py-2.5 pr-10 rounded-md text-sm text-white outline-none bg-white/8
-                               border border-white/10 focus:border-blue-400/60 focus:bg-white/12 transition-colors"
+                    className="login-input login-input-pr"
                   />
                   <button
                     type="button"
                     onClick={() => setShowSecret((v) => !v)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-white/50 hover:text-white/80 transition-colors"
+                    className="login-secret-toggle"
                     tabIndex={-1}
                   >
                     {showSecret ? (
@@ -352,7 +267,7 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                 <AnimatePresence>
                   {error && (
                     <motion.div
-                      className="text-sm px-3 py-2 rounded-md bg-red-500/15 border border-red-400/25 text-red-300"
+                      className="login-error"
                       initial={{ y: -10, opacity: 0 }}
                       animate={{ y: 0, opacity: 1 }}
                       exit={{ y: -10, opacity: 0 }}
@@ -365,18 +280,15 @@ const LoginScreen: FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                 <button
                   type="submit"
                   disabled={loading}
-                  className="mt-2 py-2.5 rounded-md text-sm font-medium text-white
-                             bg-gradient-to-br from-blue-500 to-purple-500
-                             hover:from-blue-400 hover:to-purple-400
-                             disabled:opacity-50 transition-all cursor-pointer flex items-center justify-center gap-2"
+                  className="login-submit"
                 >
                   {loading && (
-                    <svg className="animate-spin w-4 h-4" viewBox="0 0 24 24" fill="none">
+                    <svg className="login-spinner" viewBox="0 0 24 24" fill="none">
                       <circle cx="12" cy="12" r="10" stroke="white" strokeWidth="3" opacity="0.3" />
                       <path d="M12 2a10 10 0 0 1 10 10" stroke="white" strokeWidth="3" strokeLinecap="round" />
                     </svg>
                   )}
-                  {loading ? '验证中...' : '连接'}
+                  {loading ? '验证中...' : '登录'}
                 </button>
               </form>
             </motion.div>

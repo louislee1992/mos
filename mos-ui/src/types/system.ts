@@ -1,5 +1,7 @@
 export interface SystemInfo {
+  appVersion: string;
+  minioEndpoint: string;
+  minioBucket: string;
   objectCount: number;
-  totalSize: number;
-  bucketName: string;
+  totalSizeBytes: number;
 }

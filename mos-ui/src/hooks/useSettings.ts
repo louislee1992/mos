@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect } from 'react';
 import { loadSettings, saveSettings } from '../api/settings';
+import { getCredentials } from '../api/client';
 import type { UserSettings } from '../types/settings';
 import { DEFAULT_SETTINGS } from '../types/settings';
 
@@ -7,7 +8,8 @@ export function useSettings(accessKey: string | null) {
   const [settings, setSettings] = useState<UserSettings | null>(null);
 
   useEffect(() => {
-    if (!accessKey) return;
+    const { accessKey: globalAk } = getCredentials();
+    if (!accessKey || !globalAk) return;
     loadSettings()
       .then(setSettings)
       .catch((err) => {

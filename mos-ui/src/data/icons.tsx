@@ -80,11 +80,14 @@ const iconSvgs: Record<string, React.ReactNode> = {
 
   chat: (
     <svg viewBox="0 0 64 64" fill="none" className="icon-svg-full">
-      <rect x="8" y="10" width="48" height="36" rx="6" fill="#3b82f6" stroke="#2563eb" strokeWidth="1.5" />
-      <circle cx="22" cy="28" r="4" fill="#eff6ff" />
-      <circle cx="42" cy="28" r="4" fill="#eff6ff" />
-      <path d="M22 38c0-4 4.5-6 10-6s10 2 10 6" stroke="#eff6ff" strokeWidth="2.5" strokeLinecap="round" fill="none" />
-      <path d="M42 38c0-4-4.5-6-10-6" stroke="#eff6ff" strokeWidth="2" strokeLinecap="round" fill="none" opacity="0.5" />
+      <rect x="24" y="30" width="34" height="28" rx="6" fill="#09b83e" stroke="#079836" strokeWidth="1.2" />
+      <path d="M30 54l-6 6h10l-4-6z" fill="#09b83e" stroke="#079836" strokeWidth="1" />
+      <line x1="32" y1="38" x2="50" y2="38" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+      <line x1="32" y1="44" x2="44" y2="44" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+      <rect x="6" y="10" width="34" height="28" rx="6" fill="#fff" stroke="#d1d5db" strokeWidth="1.2" />
+      <path d="M14 34l-5 5h8l-3-5z" fill="#fff" stroke="#d1d5db" strokeWidth="1" />
+      <line x1="16" y1="20" x2="30" y2="20" stroke="#09b83e" strokeWidth="2" strokeLinecap="round" />
+      <line x1="16" y1="26" x2="36" y2="26" stroke="#d1d5db" strokeWidth="2" strokeLinecap="round" />
     </svg>
   ),
 

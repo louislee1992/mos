@@ -15,6 +15,9 @@ dist-ssr
 # Java build output
 target/
 
+# Chat data (server-local)
+data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

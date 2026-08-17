@@ -12,15 +12,8 @@
  * @module main
  */
 
-import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import './index.css';
 import App from './App';
 
-// 获取根 DOM 节点并渲染 React 应用
-// `!` 非空断言：确保 #root 元素一定存在于 HTML 中
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+createRoot(document.getElementById('root')!).render(<App />);

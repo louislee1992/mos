@@ -6,7 +6,6 @@ import FileManager from './FileManager';
 import RecycleBin from './RecycleBin';
 import TextEditor from './TextEditor';
 import Settings from './Settings';
-import MyAccount from './MyAccount';
 import ChatApp from './ChatApp';
 
 interface WindowProps {
@@ -17,6 +16,7 @@ interface WindowProps {
   filePath?: string;
   fileName?: string;
   initialPath?: string[];
+  initialSelectName?: string;
   initialTab?: string;
   onClose: () => void;
   onFocus: () => void;
@@ -26,10 +26,15 @@ interface WindowProps {
   zIndex: number;
   onOpenApp?: (appId: string) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
-  onOpenFileManagerAt?: (initialPath: string[]) => void;
+  onOpenFileManagerAt?: (initialPath: string[], initialSelectName?: string) => void;
   onAddUploadTask?: (fileName: string, vfsPath: string, totalBytes: number) => string;
+  onCompleteTask?: (id: string, transferredBytes?: number) => void;
+  onFailTask?: (id: string, error: string) => void;
+  onUpdateTask?: (id: string, transferredBytes: number) => void;
+  onSetTaskWriting?: (id: string) => void;
   onAddDownloadTask?: (fileName: string, vfsPath: string, totalBytes: number) => string;
   onAddMoveTask?: (fileName: string, vfsPath: string, totalBytes: number) => string;
+  unreadCounts?: Record<string, number>;
 }
 
 type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
@@ -37,7 +42,7 @@ type ResizeDir = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 const MIN_W = 300;
 const MIN_H = 200;
 
-const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, filePath, fileName, initialPath, initialTab, onClose, onFocus, onMinimize, onMaximize, isMaximized, zIndex, onOpenApp, onOpenFile, onOpenFileManagerAt, onAddUploadTask, onAddDownloadTask, onAddMoveTask }) => {
+const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, filePath, fileName, initialPath, initialSelectName, initialTab, onClose, onFocus, onMinimize, onMaximize, isMaximized, zIndex, onOpenApp, onOpenFile, onOpenFileManagerAt, onAddUploadTask, onCompleteTask, onFailTask, onUpdateTask, onSetTaskWriting, onAddDownloadTask, onAddMoveTask, unreadCounts }) => {
   const [isDirty, setIsDirty] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [pos, setPos] = useState(() => ({
@@ -164,6 +169,7 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
           cursor: dragging ? 'grabbing' : 'default',
         }}
         onMouseDown={handleMouseDown}
+        onDoubleClick={onMaximize}
       >
         <div className="window-titlebar-left">
           <span style={{ display: 'flex', alignItems: 'center', width: 16, height: 16, flexShrink: 0 }}>
@@ -178,7 +184,7 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
           </span>
         </div>
 
-        <div className="window-titlebar-actions">
+        <div className="window-titlebar-actions" onDoubleClick={(e) => e.stopPropagation()}>
           <button
             onMouseDown={(e) => {
               e.stopPropagation();
@@ -232,22 +238,18 @@ const Window: FC<WindowProps> = ({ app, accessKey, settings, onUpdateSettings, f
 
       <div className="window-body">
         {app.id === 'file-manager' ? (
-          <FileManager onOpenApp={onOpenApp} onOpenFile={onOpenFile} onOpenFileManagerAt={onOpenFileManagerAt} initialPath={initialPath} onAddUploadTask={onAddUploadTask} onAddDownloadTask={onAddDownloadTask} onAddMoveTask={onAddMoveTask} />
+          <FileManager onOpenApp={onOpenApp} onOpenFile={onOpenFile} onOpenFileManagerAt={onOpenFileManagerAt} initialPath={initialPath} initialSelectName={initialSelectName} onAddUploadTask={onAddUploadTask} onCompleteTask={onCompleteTask} onFailTask={onFailTask} onUpdateTask={onUpdateTask} onSetTaskWriting={onSetTaskWriting} onAddDownloadTask={onAddDownloadTask} onAddMoveTask={onAddMoveTask} onDragEnter={onFocus} />
         ) : app.id === 'recycle-bin' ? (
           <RecycleBin />
         ) : app.id === 'settings' ? (
-          <Settings />
-        ) : app.id === 'my-account' ? (
-          <MyAccount
+          <Settings
             accessKey={accessKey ?? null}
             settings={settings ?? null}
             onUpdateSettings={onUpdateSettings ?? (() => {})}
             initialTab={initialTab}
           />
-        ) : app.id === 'settings' ? (
-          <Settings />
         ) : app.id === 'chat' ? (
-          <ChatApp accessKey={accessKey} />
+          <ChatApp accessKey={accessKey} unreadCounts={unreadCounts ?? {}} />
         ) : app.id === 'file-editor' && filePath && fileName ? (
           <TextEditor
             filePath={filePath}

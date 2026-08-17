@@ -1,5 +1,5 @@
 import { apiGet } from './client';
-import type { DeviceInfo } from '../types/settings';
+import type { DeviceInfo, LoginHistoryEntry } from '../types/settings';
 import type { SystemInfo } from '../types/system';
 
 export function getSystemInfo() {
@@ -8,4 +8,8 @@ export function getSystemInfo() {
 
 export function getDeviceInfo() {
   return apiGet<DeviceInfo>('/api/system/device');
+}
+
+export function getLoginHistory() {
+  return apiGet<LoginHistoryEntry[]>('/api/system/login-history');
 }

@@ -1,9 +1,16 @@
-import { apiPost, apiGet } from './client';
+import { apiGet } from './client';
 
-export function verifyCredentials(endpoint: string, accessKey: string, secretKey: string) {
-  return apiPost<{ ok: boolean; bucket: string; accessKey: string }>('/api/auth/verify', {
-    endpoint, accessKey, secretKey,
+export async function verifyCredentials(accessKey: string, secretKey: string) {
+  const res = await fetch('/api/auth/verify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ accessKey, secretKey }),
   });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<{ ok: boolean; bucket: string; accessKey: string }>;
 }
 
 export function checkAdmin() {

@@ -1,6 +1,11 @@
-import { type FC, useState, useRef, useEffect } from 'react';
+import { type FC, useState, useRef, useEffect, useMemo, Fragment } from 'react';
 import type { ChatMessage, ConversationMeta, UserProfile } from '../types/chat';
+import type { ShareRecord } from '../types/share';
+import { saveShare } from '../api/share';
+import { saveChatFileToVfs } from '../api/chat';
 import EmojiPicker from './EmojiPicker';
+import ShareFileModal from './ShareFileModal';
+import SaveToModal from './SaveToModal';
 import { AnimatePresence } from 'framer-motion';
 import ImageLightbox from './ImageLightbox';
 
@@ -8,23 +13,38 @@ interface ChatViewProps {
   convId: string; conversations: ConversationMeta[];
   messages: ChatMessage[]; loading: boolean;
   currentUserKey: string; allProfiles: UserProfile[]; myProfile: UserProfile;
+  onlineAccessKeys: string[];
+  shares: ShareRecord[];
+  onShareFile: (vfsPath: string, days: number) => void;
+  onToast: (msg: string) => void;
   onSendMessage: (convId: string, content: string, msgType: string, fileName?: string, fileSize?: number) => void;
   onAddMembers: (convId: string, memberKeys: string[]) => void;
   onUploadFile: (convId: string, file: File) => Promise<string | null>;
-  onSendCloudFile: (convId: string, vfsPath: string, fileName: string) => Promise<string | null>;
   onCaptureScreenshot: () => Promise<string | null>;
-  onDownloadFile: (s3Key: string, filename: string) => void;
+  onDownloadFile: (s3Key: string, filename: string) => Promise<void>;
 }
+
+const avatarColor = (key: string) => {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 360;
+  return `hsl(${h}, 55%, 45%)`;
+};
+
+const FILE_TTL_MS = 30 * 86400000;
 
 const ChatView: FC<ChatViewProps> = ({
   convId, conversations, messages, loading, currentUserKey,
-  allProfiles, onSendMessage, onAddMembers,
-  onUploadFile, onSendCloudFile, onCaptureScreenshot, onDownloadFile,
+  allProfiles, myProfile, onlineAccessKeys, shares, onShareFile, onToast,
+  onSendMessage, onAddMembers,
+  onUploadFile, onCaptureScreenshot, onDownloadFile,
 }) => {
   const [input, setInput] = useState('');
   const [showEmoji, setShowEmoji] = useState(false);
   const [showAddMembers, setShowAddMembers] = useState(false);
   const [viewImage, setViewImage] = useState<string | null>(null);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [saveTo, setSaveTo] = useState<{ fileName: string; onConfirm: (destPath: string) => Promise<void> } | null>(null);
+  const [downloadingKey, setDownloadingKey] = useState<string | null>(null);
   const [selectedMembers, setSelectedMembers] = useState<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -32,6 +52,20 @@ const ChatView: FC<ChatViewProps> = ({
 
   const conv = conversations.find(c => c.id === convId);
   const isGroup = conv?.type === 'group';
+  const onlineSet = useMemo(() => new Set(onlineAccessKeys), [onlineAccessKeys]);
+
+  const renderMessageAvatar = (key: string, name: string) => {
+    const online = onlineSet.has(key);
+    return (
+      <div
+        className={`message-avatar${online ? ' message-avatar-online' : ''}`}
+        style={online ? { background: avatarColor(key) } : undefined}
+      >
+        {name.charAt(0).toUpperCase()}
+        <span className={`chat-online-dot${online ? ' chat-online-dot-active' : ''}`} />
+      </div>
+    );
+  };
   const convName = conv ? (isGroup ? (conv.name || '群聊') :
     (allProfiles.find(p => p.accessKey === conv.members.find(m => m !== currentUserKey))?.nickname || '用户')) : '';
 
@@ -54,11 +88,23 @@ const ChatView: FC<ChatViewProps> = ({
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const handleCloudFile = () => {
-    const vfsPath = prompt('输入 VFS 文件路径 (如 notes/readme.md):');
-    if (!vfsPath) return;
-    const fn = vfsPath.split('/').pop() || 'file';
-    onSendCloudFile(convId, vfsPath, fn).then(s3k => { if (s3k) onSendMessage(convId, s3k, 'file', fn, 0); });
+  const handleConfirmSaveTo = async (destPath: string) => {
+    if (!saveTo) return;
+    try {
+      await saveTo.onConfirm(destPath);
+      onToast(`已转存到 ${destPath || '根目录'}`);
+      window.dispatchEvent(new Event('vfs-changed'));
+      setSaveTo(null);
+    } catch (e) {
+      onToast(`转存失败: ${e}`);
+    }
+  };
+
+  const fmtSize = (n: number) => {
+    if (n >= 1024 * 1024 * 1024) return (n / 1024 / 1024 / 1024).toFixed(1) + ' GB';
+    if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
   };
 
   const handleScreenshot = async () => { const u = await onCaptureScreenshot(); if (u) onSendMessage(convId, u, 'image'); };
@@ -66,6 +112,19 @@ const ChatView: FC<ChatViewProps> = ({
   const handleAdd = () => { if (selectedMembers.size === 0) return; onAddMembers(convId, [...selectedMembers]); setSelectedMembers(new Set()); setShowAddMembers(false); };
 
   const fmt = (ts: number) => { const d = new Date(ts); return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`; };
+
+  const sameDay = (a: number, b: number) => {
+    const da = new Date(a); const db = new Date(b);
+    return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth() && da.getDate() === db.getDate();
+  };
+
+  const fmtDate = (ts: number) => {
+    const d = new Date(ts);
+    if (sameDay(ts, Date.now())) return '今天';
+    const y = new Date(); y.setDate(y.getDate() - 1);
+    if (sameDay(ts, y.getTime())) return '昨天';
+    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+  };
 
   return (
     <div className="chat-view">
@@ -91,51 +150,130 @@ const ChatView: FC<ChatViewProps> = ({
 
       <div className="message-list">
         {loading && <div className="message-loading">加载中...</div>}
-        {messages.map(msg => {
+        {messages.map((msg, i) => {
           const isSelf = msg.sender === currentUserKey;
-          return (
-            <div key={msg.id} className={`message-item${isSelf ? ' message-item-self' : ''}`}>
-              {!isSelf && <div className="message-avatar">{msg.senderName.charAt(0).toUpperCase()}</div>}
-              <div className={`message-bubble${isSelf ? ' message-bubble-self' : ''}`}>
-                {!isSelf && <div className="message-sender">{msg.senderName}</div>}
-                {msg.type === 'system' ? <div className="message-system">{msg.content}</div>
-                 : msg.type === 'image' ? <img src={msg.content} alt="截图" className="message-image" onClick={() => setViewImage(msg.content)} />
-                 : msg.type === 'file' ? (
-                  <div className="message-file">
-                    <svg viewBox="0 0 16 16" width="14" height="14" fill="none"><path d="M4 1h5l3 3v10a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1z" fill="#6b7280" stroke="#4b5563" strokeWidth="0.8"/><path d="M9 1v3h3" fill="none" stroke="#4b5563" strokeWidth="0.8"/></svg>
-                    <span>{msg.fileName || '文件'}</span>
-                    <button className="message-file-dl" onClick={() => onDownloadFile(msg.content, msg.fileName || 'file')}>下载</button>
+          const showDate = i === 0 || !sameDay(messages[i - 1].timestamp, msg.timestamp);
+          const fileExpired = msg.type === 'file' && Date.now() - msg.timestamp > FILE_TTL_MS;
+          const fileRemaining = msg.type === 'file'
+            ? Math.max(0, Math.ceil((msg.timestamp + FILE_TTL_MS - Date.now()) / 86400000))
+            : 0;
+          if (msg.type === 'system') {
+            return (
+              <Fragment key={msg.id}>
+                {showDate && <div className="message-date">{fmtDate(msg.timestamp)}</div>}
+                <div className="message-item message-item-system">
+                  <div className="message-system">{msg.content}</div>
+                </div>
+              </Fragment>
+            );
+          }
+          if (msg.type === 'share') {
+            const share = shares.find(s => s.shareId === msg.content);
+            const expired = !share || share.expiresAt < Date.now();
+            return (
+              <Fragment key={msg.id}>
+                {showDate && <div className="message-date">{fmtDate(msg.timestamp)}</div>}
+                <div className={`message-item${isSelf ? ' message-item-self' : ''}`}>
+                {renderMessageAvatar(msg.sender, isSelf ? myProfile.nickname : msg.senderName)}
+                <div className="message-body">
+                  <div className={`message-share${expired ? ' message-share-expired' : ''}`}>
+                    <svg viewBox="0 0 16 16" width="18" height="18" fill="none" className="message-share-icon">
+                      <path d="M4 1h5l3 3v10a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1z" fill="#6b7280" stroke="#4b5563" strokeWidth="0.8" />
+                      <path d="M9 1v3h3" fill="none" stroke="#4b5563" strokeWidth="0.8" />
+                    </svg>
+                    <div className="message-share-info">
+                      <div className="message-share-name">{share?.name || msg.fileName || '文件'}</div>
+                      <div className="message-share-meta">
+                        {share ? fmtSize(share.size) : ''}
+                        {expired ? ' · 已失效' : share ? ` · 剩余 ${Math.max(0, Math.ceil((share.expiresAt - Date.now()) / 86400000))} 天` : ''}
+                      </div>
+                    </div>
+                    {!isSelf && !expired && share?.url && (
+                      <div className="message-share-actions">
+                        <a className="message-share-btn" href={share.url} target="_blank" rel="noreferrer">下载</a>
+                        <button className="message-share-btn" onClick={() => setSaveTo({ fileName: share.name, onConfirm: async (dest) => { await saveShare(share.shareId, dest); } })}>转存</button>
+                      </div>
+                    )}
                   </div>
-                 ) : msg.type === 'emoji' ? <span style={{ fontSize: '2rem' }}>{msg.content}</span>
-                 : <div className="message-text">{msg.content}</div>}
+                  <div className="message-time">{fmt(msg.timestamp)}</div>
+                </div>
+                </div>
+              </Fragment>
+            );
+          }
+          return (
+            <Fragment key={msg.id}>
+              {showDate && <div className="message-date">{fmtDate(msg.timestamp)}</div>}
+              <div className={`message-item${isSelf ? ' message-item-self' : ''}`}>
+              {renderMessageAvatar(msg.sender, isSelf ? myProfile.nickname : msg.senderName)}
+              <div className="message-body">
+                <div className={`message-bubble${isSelf ? ' message-bubble-self' : ''}`}>
+                  {msg.type === 'image' ? <img src={msg.content} alt="截图" className="message-image" onClick={() => setViewImage(msg.content)} />
+                   : msg.type === 'file' ? (
+                    <div className={`message-share${fileExpired ? ' message-share-expired' : ''}`}>
+                      <svg viewBox="0 0 16 16" width="18" height="18" fill="none" className="message-share-icon">
+                        <path d="M4 1h5l3 3v10a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1z" fill="#6b7280" stroke="#4b5563" strokeWidth="0.8"/>
+                        <path d="M9 1v3h3" fill="none" stroke="#4b5563" strokeWidth="0.8"/>
+                      </svg>
+                      <div className="message-share-info">
+                        <div className="message-share-name">{msg.fileName || '文件'}</div>
+                        <div className="message-share-meta">
+                          {fmtSize(msg.fileSize)}
+                          {fileExpired ? ' · 已失效' : ` · 剩余 ${fileRemaining} 天`}
+                        </div>
+                      </div>
+                      {!isSelf && !fileExpired && (
+                        <div className="message-share-actions">
+                          <button
+                            className="message-share-btn"
+                            disabled={downloadingKey === msg.id}
+                            onClick={async () => {
+                              setDownloadingKey(msg.id);
+                              try {
+                                await onDownloadFile(msg.content, msg.fileName || 'file');
+                              } finally {
+                                setDownloadingKey(null);
+                              }
+                            }}
+                          >
+                            {downloadingKey === msg.id ? '下载中…' : '下载'}
+                          </button>
+                          <button className="message-share-btn" onClick={() => setSaveTo({ fileName: msg.fileName || '文件', onConfirm: async (dest) => { await saveChatFileToVfs(msg.content, dest); } })}>转存</button>
+                        </div>
+                      )}
+                    </div>
+                   ) : msg.type === 'emoji' ? <span style={{ fontSize: '2rem' }}>{msg.content}</span>
+                   : <div className="message-text">{msg.content}</div>}
+                </div>
                 <div className="message-time">{fmt(msg.timestamp)}</div>
               </div>
-            </div>
+              </div>
+            </Fragment>
           );
         })}
         <div ref={messagesEndRef} />
       </div>
 
       <div className="message-input-area">
-        <div className="message-input-toolbar">
-          <button className="chat-icon-btn" onClick={() => setShowEmoji(!showEmoji)} title="表情">
-            <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3"/><circle cx="5.5" cy="7" r="0.8" fill="currentColor"/><circle cx="10.5" cy="7" r="0.8" fill="currentColor"/><path d="M5 10c1 1.5 3 1.5 5 0" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
-          </button>
-          <button className="chat-icon-btn" onClick={handleScreenshot} title="截图">
-            <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><rect x="1" y="3" width="11" height="10" rx="1" stroke="currentColor" strokeWidth="1.3"/><path d="M5 1h7l3 3v7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/><circle cx="6" cy="7.5" r="1.5" stroke="currentColor" strokeWidth="1"/></svg>
-          </button>
-          <button className="chat-icon-btn" onClick={handleFile} title="发送文件">
-            <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><path d="M4 1h5l3 3v10a1 1 0 01-1 1H4a1 1 0 01-1-1V2a1 1 0 011-1z" fill="#6b7280" stroke="#4b5563" strokeWidth="0.8"/><path d="M9 1v3h3" fill="none" stroke="#4b5563" strokeWidth="0.8"/></svg>
-          </button>
-          <button className="chat-icon-btn" onClick={handleCloudFile} title="发送网盘文件">
-            <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><path d="M2 10l3-3 2 2 3-4 4 5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/><path d="M2 13h12" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
-          </button>
-        </div>
+        <textarea ref={textareaRef} className="message-input" value={input}
+          onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
+          placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" rows={2} />
         {showEmoji && <EmojiPicker onSelect={handleEmoji} onClose={() => setShowEmoji(false)} />}
         <div className="message-input-row">
-          <textarea ref={textareaRef} className="message-input" value={input}
-            onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
-            placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" rows={2} />
+          <div className="message-input-toolbar">
+            <button className="chat-icon-btn" onClick={() => setShowEmoji(!showEmoji)} title="表情">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.3"/><circle cx="5.5" cy="7" r="0.8" fill="currentColor"/><circle cx="10.5" cy="7" r="0.8" fill="currentColor"/><path d="M5 10c1 1.5 3 1.5 5 0" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
+            </button>
+            <button className="chat-icon-btn" onClick={handleScreenshot} title="截图">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><rect x="1" y="3" width="11" height="10" rx="1" stroke="currentColor" strokeWidth="1.3"/><path d="M5 1h7l3 3v7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/><circle cx="6" cy="7.5" r="1.5" stroke="currentColor" strokeWidth="1"/></svg>
+            </button>
+            <button className="chat-icon-btn" onClick={handleFile} title="发送文件">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><path d="M8 9.5V2.5m0 0L5.5 5M8 2.5l2.5 2.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/><path d="M2.5 12v1A1.5 1.5 0 004 14.5h8a1.5 1.5 0 001.5-1.5v-1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
+            </button>
+            <button className="chat-icon-btn" onClick={() => setShowShareModal(true)} title="分享网盘文件">
+              <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><circle cx="12" cy="3.5" r="2" stroke="currentColor" strokeWidth="1.3"/><circle cx="4" cy="8" r="2" stroke="currentColor" strokeWidth="1.3"/><circle cx="12" cy="12.5" r="2" stroke="currentColor" strokeWidth="1.3"/><path d="M10.2 4.6L5.8 7.2M10.2 11.4L5.8 8.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
+            </button>
+          </div>
           <button className="message-send-btn" onClick={handleSend} disabled={!input.trim()}>发送</button>
         </div>
       </div>
@@ -161,6 +299,21 @@ const ChatView: FC<ChatViewProps> = ({
             </div>
           </div>
         </div>
+      )}
+
+      {showShareModal && (
+        <ShareFileModal
+          onSend={(path, days) => { onShareFile(path, days); setShowShareModal(false); }}
+          onClose={() => setShowShareModal(false)}
+        />
+      )}
+
+      {saveTo && (
+        <SaveToModal
+          fileName={saveTo.fileName}
+          onConfirm={handleConfirmSaveTo}
+          onClose={() => setSaveTo(null)}
+        />
       )}
 
       <AnimatePresence>

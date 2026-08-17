@@ -1,7 +1,6 @@
 export interface AccountEntry {
   id: string;
   name: string;
-  endpoint: string;
   accessKey: string;
   secretKey: string;
   isAdmin: boolean;

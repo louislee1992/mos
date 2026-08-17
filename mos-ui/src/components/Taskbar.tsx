@@ -12,6 +12,9 @@
  */
 
 import { type FC, useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import type { TransferTask } from '../hooks/useTransfers';
+import TransferPanel from './TransferPanel';
 
 /** 已打开窗口的任务栏显示数据 */
 interface TaskbarApp {
@@ -45,14 +48,14 @@ interface TaskbarProps {
   accessKey: string | null;
   /** 切换应用启动器 */
   onToggleLauncher?: () => void;
-  /** 切换传输任务面板 */
-  onToggleTransfers?: () => void;
-  /** 传输面板是否打开 */
-  transfersOpen?: boolean;
+  /** 清除已完成的传输任务 */
+  onClearCompleted: () => void;
   /** 打开聊天窗口 */
   onOpenChat: () => void;
   /** 未读聊天消息总数 */
   unreadCount: number;
+  /** 文件传输任务列表 */
+  transferTasks: TransferTask[];
 }
 
 /**
@@ -167,14 +170,33 @@ const Taskbar: FC<TaskbarProps> = ({
   onLogout,
   onOpenSettings,
   onToggleLauncher,
-  onToggleTransfers,
-  transfersOpen,
+  onClearCompleted,
   accessKey,
   onOpenChat,
   unreadCount,
+  transferTasks,
 }) => {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [transferAnchor, setTransferAnchor] = useState<{ left: number; bottom: number } | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const transferWrapRef = useRef<HTMLDivElement>(null);
+  const transferBtnRef = useRef<HTMLButtonElement>(null);
+
+  const transferringCount = transferTasks.filter((t) => t.status === 'transferring').length;
+  const doneCount = transferTasks.filter((t) => t.status === 'completed' || t.status === 'failed').length;
+  const transferTotal = transferTasks.length;
+  const transferTitle = transferTotal > 0
+    ? `文件任务 — 进行中 ${transferringCount}，已完成 ${doneCount}/${transferTotal}`
+    : '文件任务';
+
+  const toggleTransfers = () => {
+    setTransferAnchor((prev) => {
+      if (prev) return null;
+      const rect = transferBtnRef.current?.getBoundingClientRect();
+      if (!rect) return { left: 68, bottom: 100 };
+      return { left: rect.right + 8, bottom: window.innerHeight - rect.bottom };
+    });
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -186,6 +208,23 @@ const Taskbar: FC<TaskbarProps> = ({
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [menuOpen]);
+
+  useEffect(() => {
+    if (!transferAnchor) return;
+    const handleClick = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (transferWrapRef.current && transferWrapRef.current.contains(t)) return;
+      if (t instanceof Element && t.closest('.transfer-panel')) return;
+      setTransferAnchor(null);
+    };
+    const handleResize = () => setTransferAnchor(null);
+    document.addEventListener('mousedown', handleClick);
+    window.addEventListener('resize', handleResize);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [transferAnchor]);
 
   return (
     <div
@@ -246,14 +285,34 @@ const Taskbar: FC<TaskbarProps> = ({
       <div className="taskbar-divider" style={{ background: 'var(--border-default)' }} />
 
       {/* 底部功能区 */}
-      <button
-        onClick={onToggleTransfers}
-        className="taskbar-btn"
-        title="文件任务"
-        style={{ background: transfersOpen ? 'var(--bg-surface-active)' : 'transparent' }}
-      >
-        <TaskIcon type="file-tasks" />
-      </button>
+      <div className="taskbar-badge-wrapper" ref={transferWrapRef}>
+        <button
+          ref={transferBtnRef}
+          onClick={toggleTransfers}
+          className="taskbar-btn"
+          title={transferTitle}
+          style={{ background: transferAnchor ? 'var(--bg-surface-active)' : 'transparent' }}
+        >
+          <TaskIcon type="file-tasks" />
+        </button>
+        {transferringCount > 0 && (
+          <span className="taskbar-badge">{transferringCount > 99 ? '99+' : transferringCount}</span>
+        )}
+        {transferAnchor &&
+          createPortal(
+            <TransferPanel
+              tasks={transferTasks}
+              onClose={() => setTransferAnchor(null)}
+              onClearCompleted={onClearCompleted}
+              style={{
+                position: 'fixed',
+                left: transferAnchor.left,
+                bottom: transferAnchor.bottom,
+              }}
+            />,
+            document.body,
+          )}
+      </div>
       <button className="taskbar-btn" title="系统通知">
         <TaskIcon type="notifications" />
       </button>
